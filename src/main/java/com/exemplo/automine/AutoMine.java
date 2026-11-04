@@ -36,8 +36,10 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *   /automine                -> liga/desliga
  *   /automine diamante       -> liga so para um minerio
  *                               (tudo, diamante, ferro, ouro, carvao, redstone, lapis, esmeralda, quartzo)
- *                               "lapis" e "tudo" tambem quebram o BLOCO de lapis-lazuli;
- *                               "blocolapis" quebra so o bloco (sem o minerio)
+ *                               Cada filtro (diamante, ferro, ouro, redstone, lapis, esmeralda)
+ *                               quebra o minerio E o bloco compacto do mesmo material.
+ *                               "blocos" quebra so os blocos compactos (sem minerios);
+ *                               "blocolapis" quebra so o bloco de lapis
  *   /automine tunel [minerio] -> modo tunel: cava em linha reta (quebra tudo na frente)
  *   /automine trecho 30      -> segundos andando numa direcao antes de trocar (padrao 30)
  *   /automine raio 64        -> distancia maxima do ponto onde voce ligou (padrao 64)
@@ -151,20 +153,28 @@ public class AutoMine {
     private boolean definirFiltro(String nome) {
         Set<Block> novo = new HashSet<Block>();
         switch (nome) {
-            case "diamante": novo.add(Blocks.diamond_ore); break;
-            case "ferro": novo.add(Blocks.iron_ore); break;
-            case "ouro": novo.add(Blocks.gold_ore); break;
+            case "diamante": novo.add(Blocks.diamond_ore); novo.add(Blocks.diamond_block); break;
+            case "ferro": novo.add(Blocks.iron_ore); novo.add(Blocks.iron_block); break;
+            case "ouro": novo.add(Blocks.gold_ore); novo.add(Blocks.gold_block); break;
             case "carvao": novo.add(Blocks.coal_ore); break;
-            case "redstone": novo.add(Blocks.redstone_ore); novo.add(Blocks.lit_redstone_ore); break;
+            case "redstone":
+                novo.add(Blocks.redstone_ore); novo.add(Blocks.lit_redstone_ore);
+                novo.add(Blocks.redstone_block);
+                break;
             case "lapis": novo.add(Blocks.lapis_ore); novo.add(Blocks.lapis_block); break;
-            case "blocolapis": novo.add(Blocks.lapis_block); break;
-            case "esmeralda": novo.add(Blocks.emerald_ore); break;
+            case "esmeralda": novo.add(Blocks.emerald_ore); novo.add(Blocks.emerald_block); break;
             case "quartzo": novo.add(Blocks.quartz_ore); break;
+            case "blocolapis": novo.add(Blocks.lapis_block); break;
+            case "blocos": // so os blocos compactos, sem os minerios
+                novo.add(Blocks.diamond_block); novo.add(Blocks.iron_block); novo.add(Blocks.gold_block);
+                novo.add(Blocks.redstone_block); novo.add(Blocks.lapis_block); novo.add(Blocks.emerald_block);
+                break;
             case "tudo":
                 novo.add(Blocks.diamond_ore); novo.add(Blocks.iron_ore); novo.add(Blocks.gold_ore);
                 novo.add(Blocks.coal_ore); novo.add(Blocks.redstone_ore); novo.add(Blocks.lit_redstone_ore);
-                novo.add(Blocks.lapis_ore); novo.add(Blocks.lapis_block);
-                novo.add(Blocks.emerald_ore); novo.add(Blocks.quartz_ore);
+                novo.add(Blocks.lapis_ore); novo.add(Blocks.emerald_ore); novo.add(Blocks.quartz_ore);
+                novo.add(Blocks.diamond_block); novo.add(Blocks.iron_block); novo.add(Blocks.gold_block);
+                novo.add(Blocks.redstone_block); novo.add(Blocks.lapis_block); novo.add(Blocks.emerald_block);
                 break;
             default: return false;
         }
@@ -594,7 +604,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-5";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-5";
         }
 
         @Override
