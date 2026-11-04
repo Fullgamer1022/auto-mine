@@ -57,6 +57,7 @@ public class AutoMine {
     private static final double ALCANCE_LONGE = 10.0;
     private static final int RAIO_LONGE = 10;
     private static final float VIDA_MINIMA = 8.0f;
+    private static final int INTERVALO_PULO = 80; // pula a cada 80 ticks = 4 segundos
 
     private final Minecraft mc = Minecraft.getMinecraft();
     private final Random rng = new Random();
@@ -78,6 +79,8 @@ public class AutoMine {
     private BlockPos coletaPos = null;
     private double ultX = 0.0;
     private double ultZ = 0.0;
+    private int ticksPuloAuto = 0;
+    private boolean puloAuto = false;
 
     @Mod.EventHandler
     public void init(FMLInitializationEvent e) {
@@ -194,6 +197,11 @@ public class AutoMine {
             return;
         }
 
+        // pulo automatico a cada 4 segundos (segura a tecla por 3 ticks)
+        ticksPuloAuto++;
+        if (ticksPuloAuto >= INTERVALO_PULO) ticksPuloAuto = 0;
+        puloAuto = ticksPuloAuto < 3;
+
         if (modoTunel) tickTunel(p);
         else tickAndar(p);
     }
@@ -210,7 +218,7 @@ public class AutoMine {
         BlockPos minerio = acharMinerio(p, RAIO_BUSCA, ALCANCE);
         if (minerio != null) {
             andar(false);
-            pular(false);
+            pular(puloAuto);
             mirar(p, minerio);
             escolherFerramenta(p, minerio);
             atacar(true);
@@ -232,7 +240,7 @@ public class AutoMine {
         if (ticksVirando > 0) {
             ticksVirando--;
             andar(false);
-            pular(false);
+            pular(puloAuto);
             suavizar(p);
             return;
         }
@@ -284,7 +292,7 @@ public class AutoMine {
             ticksVarredura = -30;
             coletaTicks = 0;
             andar(false);
-            pular(false);
+            pular(puloAuto);
             suavizar(p);
             return;
         }
@@ -312,7 +320,7 @@ public class AutoMine {
         float dif = MathHelper.wrapAngleTo180_float(yawAlvo - p.rotationYaw);
         suavizar(p);
         andar(Math.abs(dif) < 60.0f);
-        pular(degrau);
+        pular(degrau || puloAuto);
     }
 
     private void virar(int minGraus, int maxGraus) {
@@ -336,6 +344,7 @@ public class AutoMine {
     // ------------------------------------------------------- modo tunel
 
     private void tickTunel(EntityPlayerSP p) {
+        pular(puloAuto);
         BlockPos pe = new BlockPos(p.posX, p.posY, p.posZ);
         BlockPos frentePe = pe.offset(direcao);
         BlockPos frenteCabeca = frentePe.up();
