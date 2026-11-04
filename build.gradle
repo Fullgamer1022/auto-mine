@@ -1,14 +1,23 @@
 plugins {
     id "java"
     id "gg.essential.loom" version "0.10.0.5"
+    id "dev.architectury.architectury-pack200" version "0.1.3"
 }
 
 group = "com.exemplo.automine"
 version = "1.0"
 archivesBaseName = "AutoMine"
 
-sourceCompatibility = JavaVersion.VERSION_1_8
-targetCompatibility = JavaVersion.VERSION_1_8
+// O Gradle roda no Java 17, mas o mod e compilado para Java 8 (Minecraft 1.8.9)
+tasks.withType(JavaCompile).configureEach {
+    options.release = 8
+}
+
+loom {
+    forge {
+        pack200Provider.set(new dev.architectury.pack200.java.Pack200Adapter())
+    }
+}
 
 repositories {
     mavenCentral()
