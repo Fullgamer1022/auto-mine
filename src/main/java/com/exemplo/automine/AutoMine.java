@@ -34,6 +34,8 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *   /automine                -> liga/desliga (todos os minerios)
  *   /automine diamante       -> liga so para um minerio
  *                               (tudo, diamante, ferro, ouro, carvao, redstone, lapis, esmeralda, quartzo)
+ *                               "lapis" e "tudo" tambem quebram o BLOCO de lapis-lazuli;
+ *                               "blocolapis" quebra so o bloco (sem o minerio)
  *   /automine parar          -> desliga
  * Tecla M (configuravel em Controles) tambem liga/desliga.
  *
@@ -75,13 +77,15 @@ public class AutoMine {
             case "ouro": novo.add(Blocks.gold_ore); break;
             case "carvao": novo.add(Blocks.coal_ore); break;
             case "redstone": novo.add(Blocks.redstone_ore); novo.add(Blocks.lit_redstone_ore); break;
-            case "lapis": novo.add(Blocks.lapis_ore); break;
+            case "lapis": novo.add(Blocks.lapis_ore); novo.add(Blocks.lapis_block); break;
+            case "blocolapis": novo.add(Blocks.lapis_block); break;
             case "esmeralda": novo.add(Blocks.emerald_ore); break;
             case "quartzo": novo.add(Blocks.quartz_ore); break;
             case "tudo":
                 novo.add(Blocks.diamond_ore); novo.add(Blocks.iron_ore); novo.add(Blocks.gold_ore);
                 novo.add(Blocks.coal_ore); novo.add(Blocks.redstone_ore); novo.add(Blocks.lit_redstone_ore);
-                novo.add(Blocks.lapis_ore); novo.add(Blocks.emerald_ore); novo.add(Blocks.quartz_ore);
+                novo.add(Blocks.lapis_ore); novo.add(Blocks.lapis_block);
+                novo.add(Blocks.emerald_ore); novo.add(Blocks.quartz_ore);
                 break;
             default: return false;
         }
@@ -279,7 +283,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|esmeralda|quartzo|parar]";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|esmeralda|quartzo|parar]";
         }
 
         @Override
