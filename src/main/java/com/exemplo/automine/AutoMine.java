@@ -1,6 +1,7 @@
 package com.exemplo.automine;
 
 import java.util.HashSet;
+import java.util.Random;
 import java.util.Set;
 
 import org.lwjgl.input.Keyboard;
@@ -17,6 +18,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.util.BlockPos;
 import net.minecraft.util.ChatComponentText;
 import net.minecraft.util.EnumFacing;
+import net.minecraft.util.MathHelper;
 import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.util.Vec3;
 import net.minecraftforge.client.ClientCommandHandler;
@@ -31,17 +33,19 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  * AutoMine 1.8.9 - mineracao automatica com o SEU player (mod de cliente).
  *
  * Comandos (funcionam em qualquer servidor, sao processados no cliente):
- *   /automine                -> liga/desliga (todos os minerios)
+ *   /automine                -> liga/desliga
  *   /automine diamante       -> liga so para um minerio
  *                               (tudo, diamante, ferro, ouro, carvao, redstone, lapis, esmeralda, quartzo)
  *                               "lapis" e "tudo" tambem quebram o BLOCO de lapis-lazuli;
  *                               "blocolapis" quebra so o bloco (sem o minerio)
+ *   /automine tunel [minerio] -> modo tunel: cava em linha reta (quebra tudo na frente)
  *   /automine parar          -> desliga
  * Tecla M (configuravel em Controles) tambem liga/desliga.
  *
- * O que faz: cava um tunel reto na direcao em que voce estava olhando ao ligar,
- * e quebra qualquer minerio visivel ao alcance (4 blocos). Para sozinho se
- * encontrar liquido, buraco, bloco indestrutivel ou se a vida ficar baixa.
+ * MODO PADRAO (andando): o player fica andando em direcoes aleatorias, desviando de
+ * buracos, liquidos e paredes (pula degraus de 1 bloco). Quando ve um minerio, vai ate
+ * ele, quebra, pega o drop e continua andando. Nao quebra pedra comum.
+ * Para sozinho se cair lava por perto ou se a vida ficar baixa.
  */
 @Mod(modid = AutoMine.MODID, name = "AutoMine", version = "1.0",
         acceptedMinecraftVersions = "[1.8.9]", acceptableRemoteVersions = "*")
@@ -50,13 +54,30 @@ public class AutoMine {
 
     private static final double ALCANCE = 4.0;
     private static final int RAIO_BUSCA = 4;
+    private static final double ALCANCE_LONGE = 10.0;
+    private static final int RAIO_LONGE = 10;
     private static final float VIDA_MINIMA = 8.0f;
 
     private final Minecraft mc = Minecraft.getMinecraft();
+    private final Random rng = new Random();
     private KeyBinding teclaToggle;
     private boolean ativo = false;
+    private boolean modoTunel = false;
     private EnumFacing direcao = EnumFacing.NORTH;
     private final Set<Block> minerios = new HashSet<Block>();
+
+    // estado do modo andando
+    private float yawAlvo = 0.0f;
+    private int ticksAteTrocar = 0;
+    private int ticksVirando = 0;
+    private int ticksVarredura = 0;
+    private int ticksParado = 0;
+    private int coletaTicks = 0;
+    private BlockPos alvoLonge = null;
+    private BlockPos alvoMinerado = null;
+    private BlockPos coletaPos = null;
+    private double ultX = 0.0;
+    private double ultZ = 0.0;
 
     @Mod.EventHandler
     public void init(FMLInitializationEvent e) {
@@ -97,10 +118,22 @@ public class AutoMine {
     // ---------------------------------------------------------- liga/desliga
 
     private void ligar() {
-        if (mc.thePlayer == null) return;
-        direcao = mc.thePlayer.getHorizontalFacing();
+        EntityPlayerSP p = mc.thePlayer;
+        if (p == null) return;
+        direcao = p.getHorizontalFacing();
+        yawAlvo = p.rotationYaw;
+        ticksAteTrocar = 60 + rng.nextInt(120);
+        ticksVirando = 0;
+        ticksVarredura = 0;
+        ticksParado = 0;
+        coletaTicks = 0;
+        alvoLonge = null;
+        alvoMinerado = null;
+        coletaPos = null;
+        ultX = p.posX;
+        ultZ = p.posZ;
         ativo = true;
-        msg("AutoMine LIGADO (direcao: " + direcao.getName() + ")");
+        msg("AutoMine LIGADO (" + (modoTunel ? "tunel, direcao " + direcao.getName() : "andando") + ")");
     }
 
     private void desligar(String motivo) {
@@ -116,8 +149,9 @@ public class AutoMine {
     }
 
     private void soltarTeclas() {
-        KeyBinding.setKeyBindState(mc.gameSettings.keyBindAttack.getKeyCode(), false);
-        KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), false);
+        atacar(false);
+        andar(false);
+        pular(false);
     }
 
     private void atacar(boolean on) {
@@ -126,6 +160,10 @@ public class AutoMine {
 
     private void andar(boolean on) {
         KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), on);
+    }
+
+    private void pular(boolean on) {
+        KeyBinding.setKeyBindState(mc.gameSettings.keyBindJump.getKeyCode(), on);
     }
 
     // ------------------------------------------------------------------ tick
@@ -156,6 +194,148 @@ public class AutoMine {
             return;
         }
 
+        if (modoTunel) tickTunel(p);
+        else tickAndar(p);
+    }
+
+    // ------------------------------------------------------ modo andando
+
+    private void tickAndar(EntityPlayerSP p) {
+        if (p.isInLava()) {
+            desligar("Lava! Parei.");
+            return;
+        }
+
+        // 1) minerio ao alcance: para e quebra
+        BlockPos minerio = acharMinerio(p, RAIO_BUSCA, ALCANCE);
+        if (minerio != null) {
+            andar(false);
+            pular(false);
+            mirar(p, minerio);
+            escolherFerramenta(p, minerio);
+            atacar(true);
+            alvoMinerado = minerio;
+            ticksParado = 0;
+            return;
+        }
+        atacar(false);
+
+        // acabou de quebrar um: vai ate onde ele estava pra pegar o drop
+        if (alvoMinerado != null) {
+            coletaPos = alvoMinerado;
+            coletaTicks = 25;
+            alvoMinerado = null;
+            alvoLonge = null;
+        }
+
+        // 2) escolhe a direcao
+        if (ticksVirando > 0) {
+            ticksVirando--;
+            andar(false);
+            pular(false);
+            suavizar(p);
+            return;
+        }
+
+        if (coletaTicks > 0) {
+            coletaTicks--;
+            yawAlvo = yawPara(p, coletaPos);
+        } else {
+            ticksVarredura++;
+            if (ticksVarredura >= 10) {
+                ticksVarredura = 0;
+                alvoLonge = acharMinerio(p, RAIO_LONGE, ALCANCE_LONGE);
+            }
+            if (alvoLonge != null) {
+                yawAlvo = yawPara(p, alvoLonge);
+            } else {
+                ticksAteTrocar--;
+                if (ticksAteTrocar <= 0) virar(30, 120);
+            }
+        }
+
+        // 3) olha o que tem a frente
+        double rad = Math.toRadians(yawAlvo);
+        double dx = -Math.sin(rad);
+        double dz = Math.cos(rad);
+        BlockPos pe = new BlockPos(p.posX, p.posY, p.posZ);
+        BlockPos frente = new BlockPos(p.posX + dx, p.posY, p.posZ + dz);
+
+        boolean liquido = liquido(frente) || liquido(frente.down()) || liquido(frente.up());
+        boolean buraco = mc.theWorld.isAirBlock(frente.down())
+                && mc.theWorld.isAirBlock(frente.down(2))
+                && mc.theWorld.isAirBlock(frente.down(3));
+        boolean bloqueado = false;
+        boolean degrau = false;
+
+        if (liquido || buraco) {
+            bloqueado = true;
+        } else if (!passavel(frente)) {
+            if (passavel(frente.up()) && passavel(frente.up(2)) && passavel(pe.up(2))) degrau = true;
+            else bloqueado = true;
+        } else if (!passavel(frente.up())) {
+            bloqueado = true;
+        }
+
+        if (bloqueado) {
+            virar(90, 180);
+            ticksVirando = 8;
+            alvoLonge = null;
+            ticksVarredura = -30;
+            coletaTicks = 0;
+            andar(false);
+            pular(false);
+            suavizar(p);
+            return;
+        }
+
+        // 4) preso (nao saiu do lugar): vira e pula
+        double mov = Math.hypot(p.posX - ultX, p.posZ - ultZ);
+        ultX = p.posX;
+        ultZ = p.posZ;
+        if (mov < 0.01) ticksParado++;
+        else ticksParado = 0;
+        if (ticksParado > 30) {
+            ticksParado = 0;
+            virar(90, 180);
+            ticksVirando = 8;
+            alvoLonge = null;
+            ticksVarredura = -30;
+            coletaTicks = 0;
+            andar(false);
+            pular(true);
+            suavizar(p);
+            return;
+        }
+
+        // 5) anda
+        float dif = MathHelper.wrapAngleTo180_float(yawAlvo - p.rotationYaw);
+        suavizar(p);
+        andar(Math.abs(dif) < 60.0f);
+        pular(degrau);
+    }
+
+    private void virar(int minGraus, int maxGraus) {
+        float graus = minGraus + rng.nextInt(maxGraus - minGraus + 1);
+        yawAlvo += (rng.nextBoolean() ? 1.0f : -1.0f) * graus;
+        ticksAteTrocar = 60 + rng.nextInt(120);
+    }
+
+    private void suavizar(EntityPlayerSP p) {
+        float dif = MathHelper.wrapAngleTo180_float(yawAlvo - p.rotationYaw);
+        p.rotationYaw += Math.max(-25.0f, Math.min(25.0f, dif));
+        p.rotationPitch += (0.0f - p.rotationPitch) * 0.3f;
+    }
+
+    private float yawPara(EntityPlayerSP p, BlockPos pos) {
+        double dx = pos.getX() + 0.5 - p.posX;
+        double dz = pos.getZ() + 0.5 - p.posZ;
+        return (float) (Math.atan2(dz, dx) * 180.0 / Math.PI) - 90.0f;
+    }
+
+    // ------------------------------------------------------- modo tunel
+
+    private void tickTunel(EntityPlayerSP p) {
         BlockPos pe = new BlockPos(p.posX, p.posY, p.posZ);
         BlockPos frentePe = pe.offset(direcao);
         BlockPos frenteCabeca = frentePe.up();
@@ -167,14 +347,14 @@ public class AutoMine {
                 frente2, frente2.up(), frente2.down(), pe.down()
         };
         for (BlockPos b : perigos) {
-            if (mc.theWorld.getBlockState(b).getBlock().getMaterial().isLiquid()) {
+            if (liquido(b)) {
                 desligar("Liquido a frente, parei.");
                 return;
             }
         }
 
         // 1) minerio visivel ao alcance
-        BlockPos minerio = acharMinerio(p);
+        BlockPos minerio = acharMinerio(p, RAIO_BUSCA, ALCANCE);
         if (minerio != null) {
             mirar(p, minerio);
             escolherFerramenta(p, minerio);
@@ -216,26 +396,30 @@ public class AutoMine {
         return mc.theWorld.getBlockState(pos).getBlock().isPassable(mc.theWorld, pos);
     }
 
+    private boolean liquido(BlockPos pos) {
+        return mc.theWorld.getBlockState(pos).getBlock().getMaterial().isLiquid();
+    }
+
     private float dureza(BlockPos pos) {
         return mc.theWorld.getBlockState(pos).getBlock().getBlockHardness(mc.theWorld, pos);
     }
 
-    private BlockPos acharMinerio(EntityPlayerSP p) {
+    private BlockPos acharMinerio(EntityPlayerSP p, int raio, double alcance) {
         Vec3 olhos = new Vec3(p.posX, p.posY + p.getEyeHeight(), p.posZ);
         BlockPos base = new BlockPos(p.posX, p.posY + p.getEyeHeight(), p.posZ);
         BlockPos melhor = null;
         double melhorDist = Double.MAX_VALUE;
 
-        for (int dx = -RAIO_BUSCA; dx <= RAIO_BUSCA; dx++) {
-            for (int dy = -RAIO_BUSCA; dy <= RAIO_BUSCA; dy++) {
-                for (int dz = -RAIO_BUSCA; dz <= RAIO_BUSCA; dz++) {
+        for (int dx = -raio; dx <= raio; dx++) {
+            for (int dy = -raio; dy <= raio; dy++) {
+                for (int dz = -raio; dz <= raio; dz++) {
                     BlockPos pos = base.add(dx, dy, dz);
                     Block b = mc.theWorld.getBlockState(pos).getBlock();
                     if (!minerios.contains(b)) continue;
 
                     Vec3 centro = new Vec3(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
                     double d = olhos.distanceTo(centro);
-                    if (d > ALCANCE || d >= melhorDist) continue;
+                    if (d > alcance || d >= melhorDist) continue;
 
                     // so se estiver visivel (nada no meio)
                     MovingObjectPosition r = mc.theWorld.rayTraceBlocks(olhos, centro);
@@ -283,7 +467,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|esmeralda|quartzo|parar]";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|esmeralda|quartzo|parar] ou /automine tunel [minerio]";
         }
 
         @Override
@@ -306,7 +490,17 @@ public class AutoMine {
             String a = args[0].toLowerCase();
             if (a.equals("parar") || a.equals("off")) {
                 desligar("AutoMine DESLIGADO");
+            } else if (a.equals("tunel")) {
+                String f = args.length > 1 ? args[1].toLowerCase() : "tudo";
+                if (definirFiltro(f)) {
+                    modoTunel = true;
+                    ligar();
+                    msg("Minerando: " + f);
+                } else {
+                    msg("Uso: " + getCommandUsage(sender));
+                }
             } else if (definirFiltro(a)) {
+                modoTunel = false;
                 ligar();
                 msg("Minerando: " + a);
             } else {
