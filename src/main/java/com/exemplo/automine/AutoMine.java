@@ -41,6 +41,12 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *   /automine tunel [minerio] -> modo tunel: cava em linha reta (quebra tudo na frente)
  *   /automine trecho 30      -> segundos andando numa direcao antes de trocar (padrao 30)
  *   /automine raio 64        -> distancia maxima do ponto onde voce ligou (padrao 64)
+ *   /automine pos1           -> marca o 1o canto da area (onde voce esta parado)
+ *   /automine pos2           -> marca o canto oposto; a area liga sozinha
+ *                               (Y conta: pos1 no fundo e pos2 no alto, ou vice-versa)
+ *   /automine area on|off|limpar -> liga, desliga ou apaga a area
+ *                               Com area ligada ele so mina e so anda dentro dela.
+ *   /automine velocidade 2   -> 1 = bem lento (camera e quebra calmas) ... 5 = rapido (padrao 2)
  *   /automine parar          -> desliga
  * Tecla M (configuravel em Controles) tambem liga/desliga.
  *
@@ -86,6 +92,50 @@ public class AutoMine {
     private int trechoSeg = 30;        // segundos andando numa direcao antes de trocar
     private int raioPasseio = 64;      // distancia maxima do ponto onde ligou
     private BlockPos origem = null;
+
+    // velocidade (1 = bem lento ... 5 = rapido): giro da camera por tick,
+    // espera antes de comecar a bater e pausa entre um bloco e o proximo
+    private static final float[] GIRO = {4.0f, 6.0f, 9.0f, 14.0f, 25.0f};
+    private static final int[] ESPERA_MIRA = {14, 10, 6, 3, 0};
+    private static final int[] PAUSA_BLOCO = {20, 14, 8, 4, 0};
+    private int nivelVel = 2;
+    private int esperaMira = 0;
+    private int pausaTicks = 0;
+
+    // area demarcada: so mina e so anda dentro dela
+    private BlockPos pos1 = null;
+    private BlockPos pos2 = null;
+    private boolean usarArea = false;
+    private int aMinX, aMaxX, aMinY, aMaxY, aMinZ, aMaxZ;
+
+    private void atualizarArea() {
+        aMinX = Math.min(pos1.getX(), pos2.getX());
+        aMaxX = Math.max(pos1.getX(), pos2.getX());
+        aMinY = Math.min(pos1.getY(), pos2.getY());
+        aMaxY = Math.max(pos1.getY(), pos2.getY());
+        aMinZ = Math.min(pos1.getZ(), pos2.getZ());
+        aMaxZ = Math.max(pos1.getZ(), pos2.getZ());
+    }
+
+    private boolean dentroArea(BlockPos b) {
+        return b.getX() >= aMinX && b.getX() <= aMaxX
+                && b.getY() >= aMinY && b.getY() <= aMaxY
+                && b.getZ() >= aMinZ && b.getZ() <= aMaxZ;
+    }
+
+    private boolean dentroXZ(double x, double z) {
+        return x >= aMinX && x < aMaxX + 1 && z >= aMinZ && z < aMaxZ + 1;
+    }
+
+    private BlockPos centroArea() {
+        return new BlockPos((aMinX + aMaxX) / 2, (aMinY + aMaxY) / 2, (aMinZ + aMaxZ) / 2);
+    }
+
+    private String descricaoArea() {
+        if (pos1 == null || pos2 == null) return "nao definida";
+        return "X " + aMinX + " a " + aMaxX + ", Y " + aMinY + " a " + aMaxY
+                + ", Z " + aMinZ + " a " + aMaxZ + (usarArea ? " (LIGADA)" : " (desligada)");
+    }
 
     @Mod.EventHandler
     public void init(FMLInitializationEvent e) {
@@ -136,6 +186,8 @@ public class AutoMine {
         ticksVarredura = 0;
         ticksParado = 0;
         coletaTicks = 0;
+        esperaMira = 0;
+        pausaTicks = 0;
         alvoLonge = null;
         alvoMinerado = null;
         coletaPos = null;
@@ -143,6 +195,10 @@ public class AutoMine {
         ultZ = p.posZ;
         ativo = true;
         msg("AutoMine LIGADO (" + (modoTunel ? "tunel, direcao " + direcao.getName() : "andando") + ")");
+        if (usarArea) {
+            msg("Area: " + descricaoArea());
+            if (!dentroXZ(p.posX, p.posZ)) msg("Voce esta fora da area, vou andar ate ela.");
+        }
     }
 
     private void desligar(String motivo) {
@@ -221,13 +277,22 @@ public class AutoMine {
         }
 
         // 1) minerio ao alcance: para e quebra
-        BlockPos minerio = acharMinerio(p, RAIO_BUSCA, ALCANCE);
+        if (pausaTicks > 0) pausaTicks--;
+        BlockPos minerio = (pausaTicks > 0) ? null : acharMinerio(p, RAIO_BUSCA, ALCANCE);
         if (minerio != null) {
             andar(false);
             pular(puloAuto);
-            mirar(p, minerio);
+            boolean alinhado = mirarSuave(p, minerio);
             escolherFerramenta(p, minerio);
-            atacar(true);
+            if (!alinhado) {
+                esperaMira = ESPERA_MIRA[nivelVel - 1];
+                atacar(false);
+            } else if (esperaMira > 0) {
+                esperaMira--;
+                atacar(false);
+            } else {
+                atacar(true);
+            }
             alvoMinerado = minerio;
             ticksParado = 0;
             return;
@@ -238,6 +303,7 @@ public class AutoMine {
         if (alvoMinerado != null) {
             coletaPos = alvoMinerado;
             coletaTicks = 25;
+            pausaTicks = PAUSA_BLOCO[nivelVel - 1];
             alvoMinerado = null;
             alvoLonge = null;
         }
@@ -262,9 +328,12 @@ public class AutoMine {
             }
             double distOrigem = (origem == null) ? 0.0
                     : Math.hypot(p.posX - origem.getX(), p.posZ - origem.getZ());
-            if (alvoLonge != null) {
+            if (usarArea && !dentroXZ(p.posX, p.posZ)) {
+                // fora da area: caminha ate ela
+                yawAlvo = yawPara(p, centroArea());
+            } else if (alvoLonge != null) {
                 yawAlvo = yawPara(p, alvoLonge);
-            } else if (distOrigem > raioPasseio) {
+            } else if (!usarArea && distOrigem > raioPasseio) {
                 // longe demais do ponto inicial: volta pra perto
                 yawAlvo = yawPara(p, origem);
             } else {
@@ -286,8 +355,11 @@ public class AutoMine {
                 && mc.theWorld.isAirBlock(frente.down(3));
         boolean bloqueado = false;
         boolean degrau = false;
+        // na borda da area: nao deixa dar o passo pra fora
+        boolean saindo = usarArea && dentroXZ(p.posX, p.posZ)
+                && !dentroXZ(frente.getX() + 0.5, frente.getZ() + 0.5);
 
-        if (liquido || buraco) {
+        if (liquido || buraco || saindo) {
             bloqueado = true;
         } else if (!passavel(frente)) {
             if (passavel(frente.up()) && passavel(frente.up(2)) && passavel(pe.up(2))) degrau = true;
@@ -298,7 +370,7 @@ public class AutoMine {
 
         if (bloqueado) {
             virar(90, 180);
-            ticksVirando = 8;
+            ticksVirando = ticksParaVirar(p);
             alvoLonge = null;
             ticksVarredura = -30;
             coletaTicks = 0;
@@ -317,7 +389,7 @@ public class AutoMine {
         if (ticksParado > 30) {
             ticksParado = 0;
             virar(90, 180);
-            ticksVirando = 8;
+            ticksVirando = ticksParaVirar(p);
             alvoLonge = null;
             ticksVarredura = -30;
             coletaTicks = 0;
@@ -347,9 +419,18 @@ public class AutoMine {
     }
 
     private void suavizar(EntityPlayerSP p) {
+        float passo = GIRO[nivelVel - 1];
         float dif = MathHelper.wrapAngleTo180_float(yawAlvo - p.rotationYaw);
-        p.rotationYaw += Math.max(-25.0f, Math.min(25.0f, dif));
-        p.rotationPitch += (0.0f - p.rotationPitch) * 0.3f;
+        p.rotationYaw += Math.max(-passo, Math.min(passo, dif));
+        float dp = 0.0f - p.rotationPitch;
+        p.rotationPitch += Math.max(-passo, Math.min(passo, dp));
+    }
+
+    // quantos ticks leva pra girar ate yawAlvo na velocidade atual
+    private int ticksParaVirar(EntityPlayerSP p) {
+        float dif = Math.abs(MathHelper.wrapAngleTo180_float(yawAlvo - p.rotationYaw));
+        int t = (int) Math.ceil(dif / GIRO[nivelVel - 1]);
+        return Math.max(4, Math.min(60, t));
     }
 
     private float yawPara(EntityPlayerSP p, BlockPos pos) {
@@ -379,12 +460,18 @@ public class AutoMine {
             }
         }
 
+        if (usarArea && dentroXZ(p.posX, p.posZ)
+                && !dentroXZ(frentePe.getX() + 0.5, frentePe.getZ() + 0.5)) {
+            desligar("Chegou no limite da area, parei.");
+            return;
+        }
+
         // 1) minerio visivel ao alcance
         BlockPos minerio = acharMinerio(p, RAIO_BUSCA, ALCANCE);
         if (minerio != null) {
-            mirar(p, minerio);
+            boolean alinhado = mirarSuave(p, minerio);
             escolherFerramenta(p, minerio);
-            atacar(true);
+            atacar(alinhado);
             andar(false);
             return;
         }
@@ -399,9 +486,9 @@ public class AutoMine {
                 desligar("Bloco indestrutivel a frente, parei.");
                 return;
             }
-            mirar(p, quebrar);
+            boolean ok = mirarSuave(p, quebrar);
             escolherFerramenta(p, quebrar);
-            atacar(true);
+            atacar(ok);
             andar(false);
         } else {
             // caminho livre: confere se nao tem buraco antes de andar
@@ -409,10 +496,11 @@ public class AutoMine {
                 desligar("Buraco a frente, parei.");
                 return;
             }
-            p.rotationYaw = direcao.getHorizontalIndex() * 90.0f;
-            p.rotationPitch = 0.0f;
+            yawAlvo = direcao.getHorizontalIndex() * 90.0f;
+            float difTunel = MathHelper.wrapAngleTo180_float(yawAlvo - p.rotationYaw);
+            suavizar(p);
             atacar(false);
-            andar(true);
+            andar(Math.abs(difTunel) < 15.0f);
         }
     }
 
@@ -442,6 +530,7 @@ public class AutoMine {
                     BlockPos pos = base.add(dx, dy, dz);
                     Block b = mc.theWorld.getBlockState(pos).getBlock();
                     if (!minerios.contains(b)) continue;
+                    if (usarArea && !dentroArea(pos)) continue;
 
                     Vec3 centro = new Vec3(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
                     double d = olhos.distanceTo(centro);
@@ -459,13 +548,25 @@ public class AutoMine {
         return melhor;
     }
 
-    private void mirar(EntityPlayerSP p, BlockPos pos) {
+    // gira a camera aos poucos ate o bloco; devolve true quando ja esta olhando pra ele
+    private boolean mirarSuave(EntityPlayerSP p, BlockPos pos) {
         double dx = pos.getX() + 0.5 - p.posX;
         double dy = pos.getY() + 0.5 - (p.posY + p.getEyeHeight());
         double dz = pos.getZ() + 0.5 - p.posZ;
         double distH = Math.sqrt(dx * dx + dz * dz);
-        p.rotationYaw = (float) (Math.atan2(dz, dx) * 180.0 / Math.PI) - 90.0f;
-        p.rotationPitch = (float) -(Math.atan2(dy, distH) * 180.0 / Math.PI);
+        float yawT = (float) (Math.atan2(dz, dx) * 180.0 / Math.PI) - 90.0f;
+        float pitchT = (float) -(Math.atan2(dy, distH) * 180.0 / Math.PI);
+
+        float passo = GIRO[nivelVel - 1];
+        float dYaw = MathHelper.wrapAngleTo180_float(yawT - p.rotationYaw);
+        float dPitch = pitchT - p.rotationPitch;
+        p.rotationYaw += Math.max(-passo, Math.min(passo, dYaw));
+        p.rotationPitch += Math.max(-passo, Math.min(passo, dPitch));
+        p.rotationPitch = MathHelper.clamp_float(p.rotationPitch, -90.0f, 90.0f);
+
+        float restYaw = Math.abs(MathHelper.wrapAngleTo180_float(yawT - p.rotationYaw));
+        float restPitch = Math.abs(pitchT - p.rotationPitch);
+        return restYaw < 4.0f && restPitch < 4.0f;
     }
 
     private void escolherFerramenta(EntityPlayerSP p, BlockPos pos) {
@@ -493,7 +594,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|esmeralda|quartzo|parar] ou /automine tunel [minerio]";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-5";
         }
 
         @Override
@@ -516,7 +617,42 @@ public class AutoMine {
             String a = args[0].toLowerCase();
             if (a.equals("parar") || a.equals("off")) {
                 desligar("AutoMine DESLIGADO");
-            } else if (a.equals("trecho") || a.equals("raio")) {
+            } else if (a.equals("pos1") || a.equals("pos2")) {
+                EntityPlayerSP pl = mc.thePlayer;
+                BlockPos aqui = new BlockPos(pl.posX, pl.posY, pl.posZ);
+                if (a.equals("pos1")) pos1 = aqui;
+                else pos2 = aqui;
+                msg(a + " = " + aqui.getX() + " " + aqui.getY() + " " + aqui.getZ());
+                if (pos1 != null && pos2 != null) {
+                    atualizarArea();
+                    usarArea = true;
+                    msg("Area ligada: " + descricaoArea());
+                } else {
+                    msg("Agora va ate o outro canto e use /automine " + (a.equals("pos1") ? "pos2" : "pos1"));
+                }
+            } else if (a.equals("area")) {
+                String o = args.length > 1 ? args[1].toLowerCase() : "";
+                if (o.equals("limpar")) {
+                    pos1 = null;
+                    pos2 = null;
+                    usarArea = false;
+                    msg("Area removida.");
+                } else if (o.equals("off") || o.equals("desligar")) {
+                    usarArea = false;
+                    msg("Area desligada (volta a andar livre).");
+                } else if (o.equals("on") || o.equals("ligar")) {
+                    if (pos1 != null && pos2 != null) {
+                        atualizarArea();
+                        usarArea = true;
+                        msg("Area ligada: " + descricaoArea());
+                    } else {
+                        msg("Defina antes com /automine pos1 e /automine pos2.");
+                    }
+                } else {
+                    msg("Area: " + descricaoArea());
+                    msg("Uso: /automine area on | off | limpar");
+                }
+            } else if (a.equals("trecho") || a.equals("raio") || a.equals("velocidade")) {
                 int n = -1;
                 if (args.length > 1) {
                     try {
@@ -532,8 +668,11 @@ public class AutoMine {
                 } else if (a.equals("raio") && n >= 10 && n <= 500) {
                     raioPasseio = n;
                     msg("Raio maximo: " + n + " blocos");
+                } else if (a.equals("velocidade") && n >= 1 && n <= 5) {
+                    nivelVel = n;
+                    msg("Velocidade: " + n + " (1 = bem lento, 5 = rapido)");
                 } else {
-                    msg("Uso: /automine trecho <5-300 segundos> | /automine raio <10-500 blocos>");
+                    msg("Uso: /automine trecho <5-300> | raio <10-500> | velocidade <1-5>");
                 }
             } else if (a.equals("tunel")) {
                 String f = args.length > 1 ? args[1].toLowerCase() : "tudo";
