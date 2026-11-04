@@ -1,6 +1,12 @@
 package com.exemplo.automine;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
@@ -15,6 +21,7 @@ import net.minecraft.command.CommandException;
 import net.minecraft.command.ICommandSender;
 import net.minecraft.init.Blocks;
 import net.minecraft.item.ItemStack;
+import net.minecraft.network.play.client.C07PacketPlayerDigging;
 import net.minecraft.util.BlockPos;
 import net.minecraft.util.ChatComponentText;
 import net.minecraft.util.EnumFacing;
@@ -48,7 +55,11 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *                               (Y conta: pos1 no fundo e pos2 no alto, ou vice-versa)
  *   /automine area on|off|limpar -> liga, desliga ou apaga a area
  *                               Com area ligada ele so mina e so anda dentro dela.
- *   /automine velocidade 2   -> 1 = bem lento (camera e quebra calmas) ... 5 = rapido (padrao 2)
+ *   /automine multi 3        -> tenta quebrar ate 3 blocos de uma vez (1 a 5; 1 = desligado).
+ *                               Manda os pedidos de quebra todos juntos. So funciona de verdade em
+ *                               criativo ou em servidor que nao valida; em survival o servidor
+ *                               costuma ignorar os extras e pode dar kick/bloco fantasma.
+ *   /automine velocidade 6   -> 1 = bem lento (camera e quebra calmas) ... 6 = maximo (padrao 6)
  *   /automine parar          -> desliga
  * Tecla M (configuravel em Controles) tambem liga/desliga.
  *
@@ -97,12 +108,43 @@ public class AutoMine {
 
     // velocidade (1 = bem lento ... 5 = rapido): giro da camera por tick,
     // espera antes de comecar a bater e pausa entre um bloco e o proximo
-    private static final float[] GIRO = {4.0f, 6.0f, 9.0f, 14.0f, 25.0f};
-    private static final int[] ESPERA_MIRA = {14, 10, 6, 3, 0};
-    private static final int[] PAUSA_BLOCO = {20, 14, 8, 4, 0};
-    private int nivelVel = 2;
+    // nivel 6 = maximo: camera gira instantaneo, sem espera, sem pausa (como na primeira versao)
+    private static final float[] GIRO = {4.0f, 6.0f, 9.0f, 14.0f, 25.0f, 180.0f};
+    private static final int[] ESPERA_MIRA = {14, 10, 6, 3, 0, 0};
+    private static final int[] PAUSA_BLOCO = {20, 14, 8, 4, 0, 0};
+    private int nivelVel = 6;
     private int esperaMira = 0;
     private int pausaTicks = 0;
+
+    // multi-quebra: manda pedidos de quebra de ate (multi - 1) blocos extras junto com o principal
+    private static final int MULTI_MAX = 5;
+    private int multi = 1; // 1 = desligado
+    private final List<Pendente> pendentes = new ArrayList<Pendente>();
+    private final Map<BlockPos, Integer> tentativas = new HashMap<BlockPos, Integer>();
+
+    private static class Pendente {
+        final BlockPos pos;
+        final EnumFacing face;
+        int ticks;
+
+        Pendente(BlockPos pos, EnumFacing face, int ticks) {
+            this.pos = pos;
+            this.face = face;
+            this.ticks = ticks;
+        }
+    }
+
+    private static class Alvo {
+        final BlockPos pos;
+        final EnumFacing face;
+        final double dist;
+
+        Alvo(BlockPos pos, EnumFacing face, double dist) {
+            this.pos = pos;
+            this.face = face;
+            this.dist = dist;
+        }
+    }
 
     // area demarcada: so mina e so anda dentro dela
     private BlockPos pos1 = null;
@@ -213,6 +255,7 @@ public class AutoMine {
 
     private void desligar(String motivo) {
         ativo = false;
+        cancelarPendentes();
         soltarTeclas();
         msg(motivo);
     }
@@ -249,6 +292,8 @@ public class AutoMine {
 
         if (mc.thePlayer == null || mc.theWorld == null) {
             ativo = false;
+            pendentes.clear();
+            tentativas.clear();
             return;
         }
 
@@ -273,6 +318,8 @@ public class AutoMine {
         ticksPuloAuto++;
         if (ticksPuloAuto >= INTERVALO_PULO) ticksPuloAuto = 0;
         puloAuto = ticksPuloAuto < 3;
+
+        if (multi > 1) processarPendentes();
 
         if (modoTunel) tickTunel(p);
         else tickAndar(p);
@@ -304,6 +351,7 @@ public class AutoMine {
                 atacar(true);
             }
             alvoMinerado = minerio;
+            if (alinhado) multiQuebra(p, minerio);
             ticksParado = 0;
             return;
         }
@@ -482,6 +530,7 @@ public class AutoMine {
             boolean alinhado = mirarSuave(p, minerio);
             escolherFerramenta(p, minerio);
             atacar(alinhado);
+            if (alinhado) multiQuebra(p, minerio);
             andar(false);
             return;
         }
@@ -512,6 +561,104 @@ public class AutoMine {
             atacar(false);
             andar(Math.abs(difTunel) < 15.0f);
         }
+    }
+
+    // ------------------------------------------------------ multi-quebra
+
+    private void enviarDig(C07PacketPlayerDigging.Action acao, BlockPos pos, EnumFacing face) {
+        if (mc.getNetHandler() != null) {
+            mc.getNetHandler().addToSendQueue(new C07PacketPlayerDigging(acao, pos, face));
+        }
+    }
+
+    // manda START_DESTROY_BLOCK de ate (multi - 1) blocos extras visiveis ao alcance;
+    // depois do tempo de quebra manda o STOP (ver processarPendentes)
+    private void multiQuebra(EntityPlayerSP p, BlockPos principal) {
+        if (multi <= 1) return;
+        int faltam = (multi - 1) - pendentes.size();
+        if (faltam <= 0) return;
+
+        Vec3 olhos = new Vec3(p.posX, p.posY + p.getEyeHeight(), p.posZ);
+        BlockPos base = new BlockPos(p.posX, p.posY + p.getEyeHeight(), p.posZ);
+        List<Alvo> achados = new ArrayList<Alvo>();
+
+        for (int dx = -RAIO_BUSCA; dx <= RAIO_BUSCA; dx++) {
+            for (int dy = -RAIO_BUSCA; dy <= RAIO_BUSCA; dy++) {
+                for (int dz = -RAIO_BUSCA; dz <= RAIO_BUSCA; dz++) {
+                    BlockPos pos = base.add(dx, dy, dz);
+                    if (pos.equals(principal)) continue;
+                    Block b = mc.theWorld.getBlockState(pos).getBlock();
+                    if (!minerios.contains(b)) continue;
+                    if (usarArea && !dentroArea(pos)) continue;
+
+                    boolean jaPendente = false;
+                    for (Pendente pd : pendentes) {
+                        if (pd.pos.equals(pos)) {
+                            jaPendente = true;
+                            break;
+                        }
+                    }
+                    if (jaPendente) continue;
+                    Integer t = tentativas.get(pos);
+                    if (t != null && t >= 2) continue;
+
+                    Vec3 centro = new Vec3(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+                    double d = olhos.distanceTo(centro);
+                    if (d > ALCANCE) continue;
+
+                    MovingObjectPosition r = mc.theWorld.rayTraceBlocks(olhos, centro);
+                    if (r != null && r.getBlockPos() != null && r.getBlockPos().equals(pos)) {
+                        achados.add(new Alvo(pos, r.sideHit, d));
+                    }
+                }
+            }
+        }
+
+        Collections.sort(achados, new Comparator<Alvo>() {
+            @Override
+            public int compare(Alvo a, Alvo b) {
+                return Double.compare(a.dist, b.dist);
+            }
+        });
+
+        for (int i = 0; i < achados.size() && i < faltam; i++) {
+            Alvo a = achados.get(i);
+            Block b = mc.theWorld.getBlockState(a.pos).getBlock();
+            float rel = b.getPlayerRelativeBlockHardness(p, mc.theWorld, a.pos);
+            int ticks = (rel <= 0.0f) ? 100 : (int) Math.ceil(0.7f / rel) + 1;
+            ticks = Math.max(1, Math.min(200, ticks));
+
+            enviarDig(C07PacketPlayerDigging.Action.START_DESTROY_BLOCK, a.pos, a.face);
+            pendentes.add(new Pendente(a.pos, a.face, ticks));
+            Integer t = tentativas.get(a.pos);
+            tentativas.put(a.pos, t == null ? 1 : t + 1);
+        }
+    }
+
+    private void processarPendentes() {
+        for (int i = pendentes.size() - 1; i >= 0; i--) {
+            Pendente pd = pendentes.get(i);
+            Block b = mc.theWorld.getBlockState(pd.pos).getBlock();
+            if (!minerios.contains(b)) {
+                // ja quebrou (ou sumiu)
+                pendentes.remove(i);
+                tentativas.remove(pd.pos);
+                continue;
+            }
+            pd.ticks--;
+            if (pd.ticks <= 0) {
+                enviarDig(C07PacketPlayerDigging.Action.STOP_DESTROY_BLOCK, pd.pos, pd.face);
+                pendentes.remove(i);
+            }
+        }
+    }
+
+    private void cancelarPendentes() {
+        for (Pendente pd : pendentes) {
+            enviarDig(C07PacketPlayerDigging.Action.ABORT_DESTROY_BLOCK, pd.pos, pd.face);
+        }
+        pendentes.clear();
+        tentativas.clear();
     }
 
     // --------------------------------------------------------------- helpers
@@ -604,7 +751,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-5";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi 1-5";
         }
 
         @Override
@@ -662,6 +809,26 @@ public class AutoMine {
                     msg("Area: " + descricaoArea());
                     msg("Uso: /automine area on | off | limpar");
                 }
+            } else if (a.equals("multi")) {
+                int n = -1;
+                if (args.length > 1) {
+                    try {
+                        n = Integer.parseInt(args[1]);
+                    } catch (NumberFormatException ex) {
+                        n = -1;
+                    }
+                }
+                if (n >= 1 && n <= MULTI_MAX) {
+                    multi = n;
+                    if (n == 1) {
+                        cancelarPendentes();
+                        msg("Multi-quebra desligada (1 bloco por vez).");
+                    } else {
+                        msg("Multi-quebra: " + n + " blocos de uma vez. Em survival o servidor pode ignorar os extras.");
+                    }
+                } else {
+                    msg("Uso: /automine multi <1-" + MULTI_MAX + ">  (1 = desligado)");
+                }
             } else if (a.equals("trecho") || a.equals("raio") || a.equals("velocidade")) {
                 int n = -1;
                 if (args.length > 1) {
@@ -678,11 +845,11 @@ public class AutoMine {
                 } else if (a.equals("raio") && n >= 10 && n <= 500) {
                     raioPasseio = n;
                     msg("Raio maximo: " + n + " blocos");
-                } else if (a.equals("velocidade") && n >= 1 && n <= 5) {
+                } else if (a.equals("velocidade") && n >= 1 && n <= 6) {
                     nivelVel = n;
-                    msg("Velocidade: " + n + " (1 = bem lento, 5 = rapido)");
+                    msg("Velocidade: " + n + " (1 = bem lento, 6 = maximo)");
                 } else {
-                    msg("Uso: /automine trecho <5-300> | raio <10-500> | velocidade <1-5>");
+                    msg("Uso: /automine trecho <5-300> | raio <10-500> | velocidade <1-6>");
                 }
             } else if (a.equals("tunel")) {
                 String f = args.length > 1 ? args[1].toLowerCase() : "tudo";
