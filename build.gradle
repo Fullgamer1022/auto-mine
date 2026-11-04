@@ -1,0 +1,23 @@
+plugins {
+    id "java"
+    id "gg.essential.loom" version "0.10.0.5"
+}
+
+group = "com.exemplo.automine"
+version = "1.0"
+archivesBaseName = "AutoMine"
+
+sourceCompatibility = JavaVersion.VERSION_1_8
+targetCompatibility = JavaVersion.VERSION_1_8
+
+repositories {
+    mavenCentral()
+    maven { url = "https://repo.essential.gg/repository/maven-public" }
+    maven { url = "https://maven.minecraftforge.net/" }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:1.8.9"
+    mappings "de.oceanlabs.mcp:mcp_stable:22-1.8.9"
+    forge "net.minecraftforge:forge:1.8.9-11.15.1.2318-1.8.9"
+}
