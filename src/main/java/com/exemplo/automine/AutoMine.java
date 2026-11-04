@@ -39,6 +39,8 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *                               "lapis" e "tudo" tambem quebram o BLOCO de lapis-lazuli;
  *                               "blocolapis" quebra so o bloco (sem o minerio)
  *   /automine tunel [minerio] -> modo tunel: cava em linha reta (quebra tudo na frente)
+ *   /automine trecho 30      -> segundos andando numa direcao antes de trocar (padrao 30)
+ *   /automine raio 64        -> distancia maxima do ponto onde voce ligou (padrao 64)
  *   /automine parar          -> desliga
  * Tecla M (configuravel em Controles) tambem liga/desliga.
  *
@@ -81,6 +83,9 @@ public class AutoMine {
     private double ultZ = 0.0;
     private int ticksPuloAuto = 0;
     private boolean puloAuto = false;
+    private int trechoSeg = 30;        // segundos andando numa direcao antes de trocar
+    private int raioPasseio = 64;      // distancia maxima do ponto onde ligou
+    private BlockPos origem = null;
 
     @Mod.EventHandler
     public void init(FMLInitializationEvent e) {
@@ -125,7 +130,8 @@ public class AutoMine {
         if (p == null) return;
         direcao = p.getHorizontalFacing();
         yawAlvo = p.rotationYaw;
-        ticksAteTrocar = 60 + rng.nextInt(120);
+        sortearTrecho();
+        origem = new BlockPos(p.posX, p.posY, p.posZ);
         ticksVirando = 0;
         ticksVarredura = 0;
         ticksParado = 0;
@@ -254,11 +260,16 @@ public class AutoMine {
                 ticksVarredura = 0;
                 alvoLonge = acharMinerio(p, RAIO_LONGE, ALCANCE_LONGE);
             }
+            double distOrigem = (origem == null) ? 0.0
+                    : Math.hypot(p.posX - origem.getX(), p.posZ - origem.getZ());
             if (alvoLonge != null) {
                 yawAlvo = yawPara(p, alvoLonge);
+            } else if (distOrigem > raioPasseio) {
+                // longe demais do ponto inicial: volta pra perto
+                yawAlvo = yawPara(p, origem);
             } else {
                 ticksAteTrocar--;
-                if (ticksAteTrocar <= 0) virar(30, 120);
+                if (ticksAteTrocar <= 0) virar(60, 120);
             }
         }
 
@@ -326,7 +337,13 @@ public class AutoMine {
     private void virar(int minGraus, int maxGraus) {
         float graus = minGraus + rng.nextInt(maxGraus - minGraus + 1);
         yawAlvo += (rng.nextBoolean() ? 1.0f : -1.0f) * graus;
-        ticksAteTrocar = 60 + rng.nextInt(120);
+        sortearTrecho();
+    }
+
+    // quanto tempo anda numa direcao fixa antes de trocar (+-30% de variacao)
+    private void sortearTrecho() {
+        int base = trechoSeg * 20;
+        ticksAteTrocar = base * 7 / 10 + rng.nextInt(base * 6 / 10 + 1);
     }
 
     private void suavizar(EntityPlayerSP p) {
@@ -499,6 +516,25 @@ public class AutoMine {
             String a = args[0].toLowerCase();
             if (a.equals("parar") || a.equals("off")) {
                 desligar("AutoMine DESLIGADO");
+            } else if (a.equals("trecho") || a.equals("raio")) {
+                int n = -1;
+                if (args.length > 1) {
+                    try {
+                        n = Integer.parseInt(args[1]);
+                    } catch (NumberFormatException ex) {
+                        n = -1;
+                    }
+                }
+                if (a.equals("trecho") && n >= 5 && n <= 300) {
+                    trechoSeg = n;
+                    sortearTrecho();
+                    msg("Troca de direcao a cada ~" + n + " segundos");
+                } else if (a.equals("raio") && n >= 10 && n <= 500) {
+                    raioPasseio = n;
+                    msg("Raio maximo: " + n + " blocos");
+                } else {
+                    msg("Uso: /automine trecho <5-300 segundos> | /automine raio <10-500 blocos>");
+                }
             } else if (a.equals("tunel")) {
                 String f = args.length > 1 ? args[1].toLowerCase() : "tudo";
                 if (definirFiltro(f)) {
