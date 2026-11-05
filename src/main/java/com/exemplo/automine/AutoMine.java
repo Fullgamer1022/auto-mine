@@ -18,6 +18,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiChat;
+import net.minecraft.client.gui.GuiIngameMenu;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.command.CommandBase;
@@ -34,6 +35,7 @@ import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.util.Vec3;
 import net.minecraftforge.client.ClientCommandHandler;
 import net.minecraftforge.client.event.GuiScreenEvent;
+import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.client.registry.ClientRegistry;
 import net.minecraftforge.fml.common.Mod;
@@ -63,6 +65,8 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *   Dropar inventario: botao "Dropar tudo" na tela do inventario, tecla K (muda em Controles)
  *                       ou /automine dropar (tudo) / /automine dropar mochila (mantem a hotbar).
  *                       Nao dropa armadura. Dropa alguns slots por tick.
+ *   Ligar/desligar sem digitar: botao "Ligar AutoMine" no menu de pausa (Esc) e botao "Ligar mod"
+ *           na tela do inventario; tecla M tambem. Aparece um aviso verde na tela enquanto esta ligado.
  *   Vender: botao "Vender" na tela do inventario, tecla L ou /automine vender -> manda /vender.
  *           /automine vendermodo abrir -> em vez de enviar, so abre o chat com /vender digitado.
  *   /automine multi 3        -> tenta quebrar ate 3 blocos de uma vez (1 a 5; 1 = desligado).
@@ -130,6 +134,7 @@ public class AutoMine {
     private static final int BTN_DROPAR = 9001;
     private static final int DROP_POR_TICK = 3;
     private static final int BTN_VENDER = 9002;
+    private static final int BTN_TOGGLE = 9003;
     private KeyBinding teclaVender;
     private boolean venderEnviar = true; // true = envia /vender direto; false = so abre o chat com o texto
     private KeyBinding teclaDropar;
@@ -630,20 +635,49 @@ public class AutoMine {
     // botao "Dropar tudo" na tela do inventario
     @SubscribeEvent
     public void aoAbrirGui(GuiScreenEvent.InitGuiEvent.Post ev) {
+        if (ev.gui instanceof GuiIngameMenu) {
+            // menu de pausa (Esc): botao grande no canto de cima
+            ev.buttonList.add(new GuiButton(BTN_TOGGLE, 4, 4, 130, 20, textoToggle()));
+            return;
+        }
         if (ev.gui instanceof GuiInventory) {
             ev.buttonList.add(new GuiButton(BTN_DROPAR, ev.gui.width / 2 + 92, ev.gui.height / 2 - 83, 72, 20, "Dropar tudo"));
             ev.buttonList.add(new GuiButton(BTN_VENDER, ev.gui.width / 2 + 92, ev.gui.height / 2 - 59, 72, 20, "Vender"));
+            ev.buttonList.add(new GuiButton(BTN_TOGGLE, ev.gui.width / 2 + 92, ev.gui.height / 2 - 35, 72, 20, ativo ? "Desligar" : "Ligar mod"));
         }
     }
 
     @SubscribeEvent
     public void aoClicarBotao(GuiScreenEvent.ActionPerformedEvent.Post ev) {
+        if (ev.button.id == BTN_TOGGLE && (ev.gui instanceof GuiInventory || ev.gui instanceof GuiIngameMenu)) {
+            alternar();
+            return;
+        }
         if (!(ev.gui instanceof GuiInventory)) return;
         if (ev.button.id == BTN_DROPAR) {
             droparInventario(true);
         } else if (ev.button.id == BTN_VENDER) {
             vender();
         }
+    }
+
+    // liga/desliga o mod e volta pro jogo (o mod fica parado enquanto uma tela esta aberta)
+    private void alternar() {
+        if (ativo) desligar("AutoMine DESLIGADO");
+        else ligar();
+        mc.displayGuiScreen(null);
+    }
+
+    private String textoToggle() {
+        return ativo ? "Desligar AutoMine" : "Ligar AutoMine";
+    }
+
+    // aviso verde no canto da tela enquanto o mod esta ligado
+    @SubscribeEvent
+    public void aoDesenharHud(RenderGameOverlayEvent.Post ev) {
+        if (ev.type != RenderGameOverlayEvent.ElementType.ALL || !ativo) return;
+        String t = "AutoMine: LIGADO" + (usarArea ? " | area" : "") + (multi > 1 ? " | multi " + multi : "");
+        mc.fontRendererObj.drawStringWithShadow(t, 4.0f, 4.0f, 0x55FF55);
     }
 
     // manda /vender pro servidor (ou so abre o chat com /vender digitado, conforme o modo)
