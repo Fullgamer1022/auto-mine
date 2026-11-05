@@ -50,8 +50,9 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *   /automine                -> liga/desliga
  *   /automine diamante       -> liga so para um minerio
  *                               (tudo, diamante, ferro, ouro, carvao, redstone, lapis, esmeralda, quartzo)
- *                               Cada filtro (diamante, ferro, ouro, redstone, lapis, esmeralda)
- *                               quebra o minerio E o bloco compacto do mesmo material.
+ *                               Por padrao so quebra MINERIOS (blocos compactos ficam de fora).
+ *                               /automine incluirblocos on  -> passa a quebrar tambem os blocos
+ *                               compactos (diamante, ferro, ouro, redstone, lapis, esmeralda);
  *                               "blocos" quebra so os blocos compactos (sem minerios);
  *                               "blocolapis" quebra so o bloco de lapis
  *   /automine tunel [minerio] -> modo tunel: cava em linha reta (quebra tudo na frente)
@@ -101,6 +102,8 @@ public class AutoMine {
     private boolean modoTunel = false;
     private EnumFacing direcao = EnumFacing.NORTH;
     private final Set<Block> minerios = new HashSet<Block>();
+    private boolean incluirBlocos = false; // minera os blocos compactos? (padrao: nao)
+    private String filtroAtual = "tudo";
 
     // estado do modo andando
     private float yawAlvo = 0.0f;
@@ -248,6 +251,17 @@ public class AutoMine {
                 break;
             default: return false;
         }
+        // blocos compactos (diamante, ferro, ouro, redstone, lapis, esmeralda) ficam de fora,
+        // a menos que o usuario ligue com /automine incluirblocos on (ou use o filtro "blocos")
+        if (!incluirBlocos && !nome.equals("blocos") && !nome.equals("blocolapis")) {
+            novo.remove(Blocks.diamond_block);
+            novo.remove(Blocks.iron_block);
+            novo.remove(Blocks.gold_block);
+            novo.remove(Blocks.redstone_block);
+            novo.remove(Blocks.lapis_block);
+            novo.remove(Blocks.emerald_block);
+        }
+        filtroAtual = nome;
         minerios.clear();
         minerios.addAll(novo);
         return true;
@@ -879,7 +893,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi 1-5 | dropar [mochila] | vender | vendermodo enviar/abrir";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi 1-5 | incluirblocos on/off | dropar [mochila] | vender | vendermodo enviar/abrir";
         }
 
         @Override
@@ -936,6 +950,19 @@ public class AutoMine {
                 } else {
                     msg("Area: " + descricaoArea());
                     msg("Uso: /automine area on | off | limpar");
+                }
+            } else if (a.equals("incluirblocos")) {
+                String o = args.length > 1 ? args[1].toLowerCase() : "";
+                if (o.equals("on")) {
+                    incluirBlocos = true;
+                    definirFiltro(filtroAtual);
+                    msg("Agora tambem quebra os blocos compactos (diamante, ferro, ouro, redstone, lapis, esmeralda).");
+                } else if (o.equals("off")) {
+                    incluirBlocos = false;
+                    definirFiltro(filtroAtual);
+                    msg("Nao quebra mais os blocos compactos, so minerios.");
+                } else {
+                    msg("Blocos compactos: " + (incluirBlocos ? "LIGADO" : "desligado") + ". Uso: /automine incluirblocos on | off");
                 }
             } else if (a.equals("vender")) {
                 vender();
