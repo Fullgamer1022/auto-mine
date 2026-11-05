@@ -17,6 +17,7 @@ import net.minecraft.block.Block;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.client.gui.GuiButton;
+import net.minecraft.client.gui.GuiChat;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.command.CommandBase;
@@ -62,6 +63,8 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *   Dropar inventario: botao "Dropar tudo" na tela do inventario, tecla K (muda em Controles)
  *                       ou /automine dropar (tudo) / /automine dropar mochila (mantem a hotbar).
  *                       Nao dropa armadura. Dropa alguns slots por tick.
+ *   Vender: botao "Vender" na tela do inventario, tecla L ou /automine vender -> manda /vender.
+ *           /automine vendermodo abrir -> em vez de enviar, so abre o chat com /vender digitado.
  *   /automine multi 3        -> tenta quebrar ate 3 blocos de uma vez (1 a 5; 1 = desligado).
  *                               Manda os pedidos de quebra todos juntos. So funciona de verdade em
  *                               criativo ou em servidor que nao valida; em survival o servidor
@@ -126,6 +129,9 @@ public class AutoMine {
     // dropar inventario: um botao na tela do inventario, a tecla K e /automine dropar
     private static final int BTN_DROPAR = 9001;
     private static final int DROP_POR_TICK = 3;
+    private static final int BTN_VENDER = 9002;
+    private KeyBinding teclaVender;
+    private boolean venderEnviar = true; // true = envia /vender direto; false = so abre o chat com o texto
     private KeyBinding teclaDropar;
     private final ArrayDeque<Integer> filaDrop = new ArrayDeque<Integer>();
 
@@ -200,6 +206,8 @@ public class AutoMine {
         ClientRegistry.registerKeyBinding(teclaToggle);
         teclaDropar = new KeyBinding("Dropar inventario inteiro", Keyboard.KEY_K, "AutoMine");
         ClientRegistry.registerKeyBinding(teclaDropar);
+        teclaVender = new KeyBinding("Vender (/vender)", Keyboard.KEY_L, "AutoMine");
+        ClientRegistry.registerKeyBinding(teclaVender);
         ClientCommandHandler.instance.registerCommand(new CommandAutoMine());
         MinecraftForge.EVENT_BUS.register(this);
         definirFiltro("tudo");
@@ -313,6 +321,7 @@ public class AutoMine {
         }
 
         if (teclaDropar.isPressed()) droparInventario(true);
+        if (teclaVender.isPressed()) vender();
         processarFilaDrop();
 
         if (teclaToggle.isPressed()) {
@@ -623,13 +632,28 @@ public class AutoMine {
     public void aoAbrirGui(GuiScreenEvent.InitGuiEvent.Post ev) {
         if (ev.gui instanceof GuiInventory) {
             ev.buttonList.add(new GuiButton(BTN_DROPAR, ev.gui.width / 2 + 92, ev.gui.height / 2 - 83, 72, 20, "Dropar tudo"));
+            ev.buttonList.add(new GuiButton(BTN_VENDER, ev.gui.width / 2 + 92, ev.gui.height / 2 - 59, 72, 20, "Vender"));
         }
     }
 
     @SubscribeEvent
     public void aoClicarBotao(GuiScreenEvent.ActionPerformedEvent.Post ev) {
-        if (ev.gui instanceof GuiInventory && ev.button.id == BTN_DROPAR) {
+        if (!(ev.gui instanceof GuiInventory)) return;
+        if (ev.button.id == BTN_DROPAR) {
             droparInventario(true);
+        } else if (ev.button.id == BTN_VENDER) {
+            vender();
+        }
+    }
+
+    // manda /vender pro servidor (ou so abre o chat com /vender digitado, conforme o modo)
+    private void vender() {
+        EntityPlayerSP p = mc.thePlayer;
+        if (p == null) return;
+        if (venderEnviar) {
+            p.sendChatMessage("/vender");
+        } else {
+            mc.displayGuiScreen(new GuiChat("/vender"));
         }
     }
 
@@ -821,7 +845,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi 1-5 | dropar [mochila]";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi 1-5 | dropar [mochila] | vender | vendermodo enviar/abrir";
         }
 
         @Override
@@ -878,6 +902,19 @@ public class AutoMine {
                 } else {
                     msg("Area: " + descricaoArea());
                     msg("Uso: /automine area on | off | limpar");
+                }
+            } else if (a.equals("vender")) {
+                vender();
+            } else if (a.equals("vendermodo")) {
+                String o = args.length > 1 ? args[1].toLowerCase() : "";
+                if (o.equals("enviar")) {
+                    venderEnviar = true;
+                    msg("Vender: envia /vender direto.");
+                } else if (o.equals("abrir")) {
+                    venderEnviar = false;
+                    msg("Vender: abre o chat com /vender digitado (voce aperta Enter).");
+                } else {
+                    msg("Uso: /automine vendermodo enviar | abrir");
                 }
             } else if (a.equals("dropar")) {
                 // /automine dropar          -> tudo (mochila + hotbar)
