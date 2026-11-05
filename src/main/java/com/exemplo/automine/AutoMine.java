@@ -70,7 +70,8 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *           na tela do inventario; tecla M tambem. Aparece um aviso verde na tela enquanto esta ligado.
  *   Vender: botao "Vender" na tela do inventario, tecla L ou /automine vender -> manda /vender.
  *           /automine vendermodo abrir -> em vez de enviar, so abre o chat com /vender digitado.
- *   /automine multi 3        -> tenta quebrar ate 3 blocos de uma vez (1 a 5; 1 = desligado).
+ *   /automine multi 3        -> tenta quebrar ate 3 blocos de uma vez (qualquer numero de 1 a 500; 1 = desligado).
+ *                               So conta o que estiver visivel e ao alcance (4 blocos).
  *                               Manda os pedidos de quebra todos juntos. So funciona de verdade em
  *                               criativo ou em servidor que nao valida; em survival o servidor
  *                               costuma ignorar os extras e pode dar kick/bloco fantasma.
@@ -144,7 +145,8 @@ public class AutoMine {
     private final ArrayDeque<Integer> filaDrop = new ArrayDeque<Integer>();
 
     // multi-quebra: manda pedidos de quebra de ate (multi - 1) blocos extras junto com o principal
-    private static final int MULTI_MAX = 5;
+    private static final int MULTI_MAX = 500;      // teto so pra evitar digitar errado
+    private static final int ENVIOS_POR_TICK = 5;  // quantos pedidos novos manda por tick (evita flood no servidor)
     private int multi = 1; // 1 = desligado
     private final List<Pendente> pendentes = new ArrayList<Pendente>();
     private final Map<BlockPos, Integer> tentativas = new HashMap<BlockPos, Integer>();
@@ -763,7 +765,7 @@ public class AutoMine {
             }
         });
 
-        for (int i = 0; i < achados.size() && i < faltam; i++) {
+        for (int i = 0; i < achados.size() && i < faltam && i < ENVIOS_POR_TICK; i++) {
             Alvo a = achados.get(i);
             Block b = mc.theWorld.getBlockState(a.pos).getBlock();
             float rel = b.getPlayerRelativeBlockHardness(p, mc.theWorld, a.pos);
@@ -893,7 +895,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi 1-5 | incluirblocos on/off | dropar [mochila] | vender | vendermodo enviar/abrir";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi <numero> | incluirblocos on/off | dropar [mochila] | vender | vendermodo enviar/abrir";
         }
 
         @Override
