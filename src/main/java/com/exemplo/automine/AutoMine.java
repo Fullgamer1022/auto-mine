@@ -1,5 +1,6 @@
 package com.exemplo.automine;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -15,6 +16,8 @@ import org.lwjgl.input.Keyboard;
 import net.minecraft.block.Block;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityPlayerSP;
+import net.minecraft.client.gui.GuiButton;
+import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.command.CommandBase;
 import net.minecraft.command.CommandException;
@@ -29,6 +32,7 @@ import net.minecraft.util.MathHelper;
 import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.util.Vec3;
 import net.minecraftforge.client.ClientCommandHandler;
+import net.minecraftforge.client.event.GuiScreenEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.client.registry.ClientRegistry;
 import net.minecraftforge.fml.common.Mod;
@@ -55,6 +59,9 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *                               (Y conta: pos1 no fundo e pos2 no alto, ou vice-versa)
  *   /automine area on|off|limpar -> liga, desliga ou apaga a area
  *                               Com area ligada ele so mina e so anda dentro dela.
+ *   Dropar inventario: botao "Dropar tudo" na tela do inventario, tecla K (muda em Controles)
+ *                       ou /automine dropar (tudo) / /automine dropar mochila (mantem a hotbar).
+ *                       Nao dropa armadura. Dropa alguns slots por tick.
  *   /automine multi 3        -> tenta quebrar ate 3 blocos de uma vez (1 a 5; 1 = desligado).
  *                               Manda os pedidos de quebra todos juntos. So funciona de verdade em
  *                               criativo ou em servidor que nao valida; em survival o servidor
@@ -115,6 +122,12 @@ public class AutoMine {
     private int nivelVel = 6;
     private int esperaMira = 0;
     private int pausaTicks = 0;
+
+    // dropar inventario: um botao na tela do inventario, a tecla K e /automine dropar
+    private static final int BTN_DROPAR = 9001;
+    private static final int DROP_POR_TICK = 3;
+    private KeyBinding teclaDropar;
+    private final ArrayDeque<Integer> filaDrop = new ArrayDeque<Integer>();
 
     // multi-quebra: manda pedidos de quebra de ate (multi - 1) blocos extras junto com o principal
     private static final int MULTI_MAX = 5;
@@ -185,6 +198,8 @@ public class AutoMine {
     public void init(FMLInitializationEvent e) {
         teclaToggle = new KeyBinding("Ligar/desligar AutoMine", Keyboard.KEY_M, "AutoMine");
         ClientRegistry.registerKeyBinding(teclaToggle);
+        teclaDropar = new KeyBinding("Dropar inventario inteiro", Keyboard.KEY_K, "AutoMine");
+        ClientRegistry.registerKeyBinding(teclaDropar);
         ClientCommandHandler.instance.registerCommand(new CommandAutoMine());
         MinecraftForge.EVENT_BUS.register(this);
         definirFiltro("tudo");
@@ -296,6 +311,9 @@ public class AutoMine {
             tentativas.clear();
             return;
         }
+
+        if (teclaDropar.isPressed()) droparInventario(true);
+        processarFilaDrop();
 
         if (teclaToggle.isPressed()) {
             if (ativo) desligar("AutoMine DESLIGADO");
@@ -563,6 +581,58 @@ public class AutoMine {
         }
     }
 
+    // ---------------------------------------------------- dropar inventario
+
+    // coloca na fila todos os slots com item: mochila (9-35) e, se pedido, hotbar (36-44).
+    // A armadura (5-8) nao e dropada.
+    private void droparInventario(boolean incluirHotbar) {
+        EntityPlayerSP p = mc.thePlayer;
+        if (p == null || mc.playerController == null) return;
+        filaDrop.clear();
+        int ultimo = incluirHotbar ? 44 : 35;
+        for (int slot = 9; slot <= ultimo; slot++) {
+            if (p.inventoryContainer.getSlot(slot).getHasStack()) filaDrop.add(slot);
+        }
+        if (filaDrop.isEmpty()) {
+            msg("Nada pra dropar.");
+        } else {
+            msg("Dropando " + filaDrop.size() + " pilhas...");
+        }
+    }
+
+    // dropa alguns slots por tick (pra nao mandar tudo de uma vez pro servidor)
+    private void processarFilaDrop() {
+        if (filaDrop.isEmpty()) return;
+        EntityPlayerSP p = mc.thePlayer;
+        if (p == null || mc.playerController == null) {
+            filaDrop.clear();
+            return;
+        }
+        for (int i = 0; i < DROP_POR_TICK && !filaDrop.isEmpty(); i++) {
+            int slot = filaDrop.poll();
+            if (p.inventoryContainer.getSlot(slot).getHasStack()) {
+                // modo 4 (soltar), botao 1 = pilha inteira
+                mc.playerController.windowClick(p.inventoryContainer.windowId, slot, 1, 4, p);
+            }
+        }
+        if (filaDrop.isEmpty()) msg("Inventario dropado.");
+    }
+
+    // botao "Dropar tudo" na tela do inventario
+    @SubscribeEvent
+    public void aoAbrirGui(GuiScreenEvent.InitGuiEvent.Post ev) {
+        if (ev.gui instanceof GuiInventory) {
+            ev.buttonList.add(new GuiButton(BTN_DROPAR, ev.gui.width / 2 + 92, ev.gui.height / 2 - 83, 72, 20, "Dropar tudo"));
+        }
+    }
+
+    @SubscribeEvent
+    public void aoClicarBotao(GuiScreenEvent.ActionPerformedEvent.Post ev) {
+        if (ev.gui instanceof GuiInventory && ev.button.id == BTN_DROPAR) {
+            droparInventario(true);
+        }
+    }
+
     // ------------------------------------------------------ multi-quebra
 
     private void enviarDig(C07PacketPlayerDigging.Action acao, BlockPos pos, EnumFacing face) {
@@ -751,7 +821,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi 1-5";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi 1-5 | dropar [mochila]";
         }
 
         @Override
@@ -809,6 +879,11 @@ public class AutoMine {
                     msg("Area: " + descricaoArea());
                     msg("Uso: /automine area on | off | limpar");
                 }
+            } else if (a.equals("dropar")) {
+                // /automine dropar          -> tudo (mochila + hotbar)
+                // /automine dropar mochila  -> so a mochila, mantem a hotbar
+                boolean soMochila = args.length > 1 && args[1].equalsIgnoreCase("mochila");
+                droparInventario(!soMochila);
             } else if (a.equals("multi")) {
                 int n = -1;
                 if (args.length > 1) {
