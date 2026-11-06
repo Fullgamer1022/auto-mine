@@ -51,51 +51,40 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
 /**
  * AutoMine 1.8.9 - mineracao automatica com o SEU player (mod de cliente).
  *
- * Comandos (funcionam em qualquer servidor, sao processados no cliente):
- *   /automine                -> liga/desliga
- *   /automine diamante       -> liga so para um minerio
- *                               (tudo, diamante, ferro, ouro, carvao, redstone, lapis, esmeralda, quartzo)
- *                               Por padrao so quebra MINERIOS (blocos compactos ficam de fora).
- *                               /automine incluirblocos on  -> passa a quebrar tambem os blocos
- *                               compactos (diamante, ferro, ouro, redstone, lapis, esmeralda);
- *                               "blocos" quebra so os blocos compactos (sem minerios);
- *                               "blocolapis" quebra so o bloco de lapis
- *   /automine tunel [minerio] -> modo tunel: cava em linha reta (quebra tudo na frente)
- *   /automine escavar        -> quebra TODOS os blocos da area demarcada (pos1/pos2), qualquer tipo,
- *                               de cima pra baixo. Fique dentro da area, de preferencia no ponto mais
- *                               alto. Pula bedrock/inquebraveis e blocos encostados em agua/lava.
- *                               Desliga sozinho quando a area fica limpa. (multi nao vale aqui)
- *   /automine trecho 30      -> segundos andando numa direcao antes de trocar (padrao 30)
- *   /automine raio 64        -> distancia maxima do ponto onde voce ligou (padrao 64)
- *   /automine pos1           -> marca o 1o canto da area (onde voce esta parado)
- *   /automine pos2           -> marca o canto oposto; a area liga sozinha
- *                               (Y conta: pos1 no fundo e pos2 no alto, ou vice-versa)
- *   /automine area on|off|limpar -> liga, desliga ou apaga a area
- *                               Com area ligada ele so mina e so anda dentro dela.
- *   Dropar inventario: botao "Dropar tudo" na tela do inventario, tecla K (muda em Controles)
- *                       ou /automine dropar (tudo) / /automine dropar mochila (mantem a hotbar).
- *                       Nao dropa armadura. Dropa alguns slots por tick.
- *   Ligar/desligar sem digitar: botao "Ligar AutoMine" no menu de pausa (Esc) e botao "Ligar mod"
- *           na tela do inventario; tecla M tambem. Aparece um aviso verde na tela enquanto esta ligado.
- *   Ver players por perto: tecla P ou botao "Ver players" no menu de pausa (Esc) liga/desliga
- *           a lista (nome + distancia) e as linhas ate cada player (aparecem atraves das paredes).
- *           /automine players on|off|lista|linhas|alcance <10-300>  (padrao 64 blocos)
- *           So mostra quem o seu jogo ja carregou (o servidor nao manda players muito longe).
- *   Vender: botao "Vender" na tela do inventario, tecla L ou /automine vender -> manda /vender.
- *           /automine vendermodo abrir -> em vez de enviar, so abre o chat com /vender digitado.
- *   /automine multi 3        -> tenta quebrar ate 3 blocos de uma vez (qualquer numero de 1 a 500; 1 = desligado).
- *                               So conta o que estiver visivel e ao alcance (4 blocos).
- *                               Manda os pedidos de quebra todos juntos. So funciona de verdade em
- *                               criativo ou em servidor que nao valida; em survival o servidor
- *                               costuma ignorar os extras e pode dar kick/bloco fantasma.
- *   /automine velocidade 6   -> 1 = bem lento (camera e quebra calmas) ... 6 = maximo (padrao 6)
- *   /automine parar          -> desliga
- * Tecla M (configuravel em Controles) tambem liga/desliga.
+ * AJUDA NO JOGO: digite  /automine ajuda   (e  /automine status  pra ver os ajustes atuais).
  *
- * MODO PADRAO (andando): o player fica andando em direcoes aleatorias, desviando de
- * buracos, liquidos e paredes (pula degraus de 1 bloco). Quando ve um minerio, vai ate
- * ele, quebra, pega o drop e continua andando. Nao quebra pedra comum.
- * Para sozinho se cair lava por perto ou se a vida ficar baixa.
+ * LIGAR / DESLIGAR
+ *   /automine (liga/desliga) | /automine parar | tecla M | botao no menu Esc | botao no inventario
+ *
+ * O QUE MINERAR
+ *   /automine tudo|diamante|ferro|ouro|carvao|redstone|lapis|esmeralda|quartzo
+ *   /automine incluirblocos on|off  -> tambem quebra blocos compactos (padrao: off)
+ *   /automine blocos | blocolapis   -> so blocos compactos
+ *   /automine tunel [minerio]       -> cava em linha reta
+ *
+ * AREA DEMARCADA
+ *   /automine pos1 | pos2           -> marca os cantos (a area liga sozinha; a altura Y conta)
+ *   /automine area on|off|limpar    -> liga, desliga ou apaga a area
+ *   /automine escavar               -> quebra TODOS os blocos da area, de cima pra baixo
+ *
+ * AJUSTES
+ *   /automine velocidade 1-6        -> 1 = lento ... 6 = maximo (padrao 6)
+ *   /automine limite N              -> para depois de quebrar N blocos (0 = sem limite)
+ *   /automine multi N               -> quantos blocos de uma vez (1 a 500)
+ *   /automine multi on|off          -> LIGA/DESLIGA o multi (tecla N ou botao). Comeca desligado.
+ *   /automine trecho S | raio N     -> segundos por direcao | distancia maxima do ponto inicial
+ *
+ * EXTRAS
+ *   Ver players: tecla P, botao no Esc, /automine players on|off|lista|linhas|alcance N
+ *   Dropar inventario: tecla K, botao no inventario, /automine dropar [mochila]
+ *   Vender: tecla L, botao no inventario, /automine vender | vendermodo enviar|abrir
+ *
+ * NOTAS
+ *   - Modo padrao (andando): anda em direcoes aleatorias, desvia de buracos/liquidos/paredes,
+ *     vai ate o minerio, quebra e pega o drop. Nao quebra pedra comum.
+ *   - Multi: manda varios pedidos de quebra juntos. So funciona de verdade em criativo ou em
+ *     servidor que nao valida; em survival costuma ser ignorado e pode dar kick/bloco fantasma.
+ *   - Para sozinho se cair em lava, se a vida ficar baixa ou ao atingir o limite de blocos.
  */
 @Mod(modid = AutoMine.MODID, name = "AutoMine", version = "1.0",
         acceptedMinecraftVersions = "[1.8.9]", acceptableRemoteVersions = "*")
@@ -155,12 +144,14 @@ public class AutoMine {
     private static final int BTN_VENDER = 9002;
     private static final int BTN_TOGGLE = 9003;
     private static final int BTN_PLAYERS = 9004;
+    private static final int BTN_MULTI = 9005;
 
     // ver players por perto: lista na tela + linhas ate cada um (aparecem atraves das paredes)
     private boolean listaPlayers = false;
     private boolean linhasPlayers = false;
     private int alcancePlayers = 64;
     private KeyBinding teclaPlayers;
+    private KeyBinding teclaMulti;
     private KeyBinding teclaVender;
     private boolean venderEnviar = true; // true = envia /vender direto; false = so abre o chat com o texto
     private KeyBinding teclaDropar;
@@ -169,19 +160,31 @@ public class AutoMine {
     // multi-quebra: manda pedidos de quebra de ate (multi - 1) blocos extras junto com o principal
     private static final int MULTI_MAX = 500;      // teto so pra evitar digitar errado
     private static final int ENVIOS_POR_TICK = 5;  // quantos pedidos novos manda por tick (evita flood no servidor)
-    private int multi = 1; // 1 = desligado
+    private int multi = 5;                // quantos blocos de uma vez (1 a MULTI_MAX)
+    private boolean multiLigado = false;  // o multi so age quando VOCE liga (comando, tecla N ou botao)
+
+    // limite de blocos quebrados por rodada (0 = sem limite)
+    private int limiteBlocos = 0;
+    private int quebrados = 0;
+    private BlockPos alvoContagem = null;
+
+    // multi com voce quebrando: true = os extras sao do MESMO tipo do bloco que voce quebra;
+    // false = qualquer bloco por perto
+    private boolean multiSoIgual = true;
     private final List<Pendente> pendentes = new ArrayList<Pendente>();
     private final Map<BlockPos, Integer> tentativas = new HashMap<BlockPos, Integer>();
 
     private static class Pendente {
         final BlockPos pos;
         final EnumFacing face;
+        final Block tipo; // tipo do bloco quando o pedido foi feito (se mudar, ele quebrou)
         int ticks;
 
-        Pendente(BlockPos pos, EnumFacing face, int ticks) {
+        Pendente(BlockPos pos, EnumFacing face, int ticks, Block tipo) {
             this.pos = pos;
             this.face = face;
             this.ticks = ticks;
+            this.tipo = tipo;
         }
     }
 
@@ -242,6 +245,8 @@ public class AutoMine {
         ClientRegistry.registerKeyBinding(teclaVender);
         teclaPlayers = new KeyBinding("Ver players por perto", Keyboard.KEY_P, "AutoMine");
         ClientRegistry.registerKeyBinding(teclaPlayers);
+        teclaMulti = new KeyBinding("Ligar/desligar multi-quebra", Keyboard.KEY_N, "AutoMine");
+        ClientRegistry.registerKeyBinding(teclaMulti);
         ClientCommandHandler.instance.registerCommand(new CommandAutoMine());
         MinecraftForge.EVENT_BUS.register(this);
         definirFiltro("tudo");
@@ -315,6 +320,8 @@ public class AutoMine {
         ultZ = p.posZ;
         ativo = true;
         ultimoAlvoEscavar = null;
+        quebrados = 0;
+        alvoContagem = null;
         msg("AutoMine LIGADO (" + (modoEscavar ? "escavando a area"
                 : (modoTunel ? "tunel, direcao " + direcao.getName() : "andando")) + ")");
         if (usarArea) {
@@ -369,6 +376,7 @@ public class AutoMine {
 
         if (teclaDropar.isPressed()) droparInventario(true);
         if (teclaVender.isPressed()) vender();
+        if (teclaMulti.isPressed()) alternarMulti(!multiLigado);
         if (teclaPlayers.isPressed()) {
             alternarPlayers();
             msg("Ver players: " + (listaPlayers ? "LIGADO" : "desligado"));
@@ -379,7 +387,14 @@ public class AutoMine {
             if (ativo) desligar("AutoMine DESLIGADO");
             else ligar();
         }
-        if (!ativo) return;
+        if (!ativo) {
+            // mod desligado: o multi ajuda enquanto VOCE quebra os blocos
+            if (multiAtivo() && mc.currentScreen == null) {
+                processarPendentes();
+                multiManual(mc.thePlayer);
+            }
+            return;
+        }
 
         EntityPlayerSP p = mc.thePlayer;
 
@@ -397,7 +412,14 @@ public class AutoMine {
         if (ticksPuloAuto >= INTERVALO_PULO) ticksPuloAuto = 0;
         puloAuto = ticksPuloAuto < 3;
 
-        if (multi > 1) processarPendentes();
+        if (multiAtivo()) processarPendentes();
+
+        // conta os blocos quebrados e para no limite
+        contarQuebras();
+        if (limiteBlocos > 0 && quebrados >= limiteBlocos) {
+            desligar("Limite atingido: " + quebrados + " blocos quebrados. Parei.");
+            return;
+        }
 
         if (modoEscavar) tickEscavar(p);
         else if (modoTunel) tickTunel(p);
@@ -430,7 +452,8 @@ public class AutoMine {
                 atacar(true);
             }
             alvoMinerado = minerio;
-            if (alinhado) multiQuebra(p, minerio);
+            alvoContagem = minerio;
+            if (alinhado) multiQuebra(p, minerio, false);
             ticksParado = 0;
             return;
         }
@@ -712,6 +735,7 @@ public class AutoMine {
                 atacar(true);
             }
             ultimoAlvoEscavar = alvo;
+            alvoContagem = alvo;
             ticksParado = 0;
             ultX = p.posX;
             ultZ = p.posZ;
@@ -796,7 +820,8 @@ public class AutoMine {
             boolean alinhado = mirarSuave(p, minerio);
             escolherFerramenta(p, minerio);
             atacar(alinhado);
-            if (alinhado) multiQuebra(p, minerio);
+            alvoContagem = minerio;
+            if (alinhado) multiQuebra(p, minerio, false);
             andar(false);
             return;
         }
@@ -814,6 +839,7 @@ public class AutoMine {
             boolean ok = mirarSuave(p, quebrar);
             escolherFerramenta(p, quebrar);
             atacar(ok);
+            alvoContagem = quebrar;
             andar(false);
         } else {
             // caminho livre: confere se nao tem buraco antes de andar
@@ -873,17 +899,25 @@ public class AutoMine {
             // menu de pausa (Esc): botao grande no canto de cima
             ev.buttonList.add(new GuiButton(BTN_TOGGLE, 4, 4, 130, 20, textoToggle()));
             ev.buttonList.add(new GuiButton(BTN_PLAYERS, 4, 28, 130, 20, textoPlayers()));
+            ev.buttonList.add(new GuiButton(BTN_MULTI, 4, 52, 130, 20, textoMulti()));
             return;
         }
         if (ev.gui instanceof GuiInventory) {
             ev.buttonList.add(new GuiButton(BTN_DROPAR, ev.gui.width / 2 + 92, ev.gui.height / 2 - 83, 72, 20, "Dropar tudo"));
             ev.buttonList.add(new GuiButton(BTN_VENDER, ev.gui.width / 2 + 92, ev.gui.height / 2 - 59, 72, 20, "Vender"));
             ev.buttonList.add(new GuiButton(BTN_TOGGLE, ev.gui.width / 2 + 92, ev.gui.height / 2 - 35, 72, 20, ativo ? "Desligar" : "Ligar mod"));
+            ev.buttonList.add(new GuiButton(BTN_MULTI, ev.gui.width / 2 + 92, ev.gui.height / 2 - 11, 72, 20, textoMultiCurto()));
         }
     }
 
     @SubscribeEvent
     public void aoClicarBotao(GuiScreenEvent.ActionPerformedEvent.Post ev) {
+        if (ev.button.id == BTN_MULTI && (ev.gui instanceof GuiIngameMenu || ev.gui instanceof GuiInventory)) {
+            // liga/desliga o multi e deixa a tela aberta, so troca o texto do botao
+            alternarMulti(!multiLigado);
+            ev.button.displayString = (ev.gui instanceof GuiIngameMenu) ? textoMulti() : textoMultiCurto();
+            return;
+        }
         if (ev.button.id == BTN_PLAYERS && ev.gui instanceof GuiIngameMenu) {
             // liga/desliga e deixa o menu aberto, so troca o texto do botao
             alternarPlayers();
@@ -919,12 +953,139 @@ public class AutoMine {
         if (ev.type != RenderGameOverlayEvent.ElementType.ALL) return;
         int y = 4;
         if (ativo) {
-            String t = "AutoMine: LIGADO" + (usarArea ? " | area" : "") + (multi > 1 ? " | multi " + multi : "")
+            String t = "AutoMine: LIGADO" + (usarArea ? " | area" : "") + (multiAtivo() ? " | multi " + multi : "")
+                    + (limiteBlocos > 0 ? " | " + quebrados + "/" + limiteBlocos : "")
                     + (modoEscavar ? " | escavando" : "");
             mc.fontRendererObj.drawStringWithShadow(t, 4.0f, (float) y, 0x55FF55);
             y += 12;
         }
         desenharLista(y);
+    }
+
+    // ---------------------------------------------- multi, limite e ajuda
+
+    private boolean multiAtivo() {
+        return multiLigado && multi > 1;
+    }
+
+    // voce quebrando um bloco (botao de bater apertado olhando pra um bloco) com o multi ligado:
+    // manda os pedidos dos blocos de perto junto
+    private void multiManual(EntityPlayerSP p) {
+        if (p == null || !mc.gameSettings.keyBindAttack.isKeyDown()) return;
+        MovingObjectPosition mop = mc.objectMouseOver;
+        if (mop == null || mop.typeOfHit != MovingObjectPosition.MovingObjectType.BLOCK) return;
+        BlockPos principal = mop.getBlockPos();
+        if (principal == null) return;
+        multiQuebra(p, principal, true);
+    }
+
+    private void alternarMulti(boolean ligar) {
+        multiLigado = ligar;
+        if (!ligar) cancelarPendentes();
+        msg("Multi-quebra " + (ligar ? "LIGADO" : "desligado") + " (" + multi + " blocos)"
+                + ((ligar && multi <= 1) ? " - a quantidade esta em 1, use /automine multi 5" : ""));
+    }
+
+    private String textoMulti() {
+        return multiLigado ? "Multi: LIGADO (" + multi + ")" : "Multi: desligado";
+    }
+
+    private String textoMultiCurto() {
+        return multiLigado ? "Multi: ON" : "Multi: off";
+    }
+
+    // conta o bloco que estava sendo quebrado quando ele some (vira ar)
+    private void contarQuebras() {
+        if (alvoContagem != null && mc.theWorld.isAirBlock(alvoContagem)) {
+            quebrados++;
+            alvoContagem = null;
+        }
+    }
+
+    // linha no chat sem o prefixo [AutoMine] (usada na ajuda)
+    private void lin(String s) {
+        if (mc.thePlayer != null) {
+            mc.thePlayer.addChatMessage(new ChatComponentText(s));
+        }
+    }
+
+    private void status() {
+        String modo = modoEscavar ? "escavar area" : (modoTunel ? "tunel" : "andando");
+        lin("§6--- Status do AutoMine ---");
+        lin("§fLigado: §e" + (ativo ? "sim" : "nao") + "§f | Modo: §e" + modo);
+        lin("§fMinerando: §e" + filtroAtual + "§f | Blocos compactos: §e" + (incluirBlocos ? "sim" : "nao"));
+        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo)");
+        lin("§fLimite: §e" + (limiteBlocos == 0 ? "sem limite" : limiteBlocos + " blocos")
+                + "§f | Quebrados agora: §e" + quebrados);
+        lin("§fMulti: §e" + (multiLigado ? "LIGADO" : "desligado") + "§f | Quantidade: §e" + multi
+                + "§f | Extras: §e" + (multiSoIgual ? "mesmo tipo" : "qualquer bloco"));
+        lin("§fArea: §e" + descricaoArea());
+        lin("§7Ajuda completa: /automine ajuda");
+    }
+
+    private void ajuda(String t) {
+        String ouro = "§6", branco = "§f", cinza = "§7", verde = "§a", amarelo = "§e";
+        if (t.equals("ligar")) {
+            lin(ouro + "--- Ligar e desligar ---");
+            lin(branco + "/automine " + cinza + "- liga ou desliga (usa o ultimo modo)");
+            lin(branco + "/automine parar " + cinza + "- desliga");
+            lin(branco + "Tecla M " + cinza + "- liga ou desliga");
+            lin(branco + "Menu Esc " + cinza + "- botao \"Ligar AutoMine\"");
+            lin(branco + "Inventario " + cinza + "- botao \"Ligar mod\"");
+            lin(cinza + "Enquanto esta ligado aparece um aviso verde no canto da tela.");
+        } else if (t.equals("minerar")) {
+            lin(ouro + "--- O que minerar ---");
+            lin(branco + "/automine tudo " + cinza + "- todos os minerios (padrao)");
+            lin(branco + "/automine diamante " + cinza + "- so um minerio. Tambem: ferro, ouro, carvao, redstone, lapis, esmeralda, quartzo");
+            lin(branco + "/automine incluirblocos on|off " + cinza + "- tambem quebra os blocos compactos (diamante, ferro...). Padrao: off");
+            lin(branco + "/automine blocos " + cinza + "- so os blocos compactos");
+            lin(branco + "/automine tunel [minerio] " + cinza + "- cava em linha reta");
+            lin(branco + "/automine escavar " + cinza + "- quebra tudo dentro da area (veja: ajuda area)");
+        } else if (t.equals("area")) {
+            lin(ouro + "--- Area demarcada ---");
+            lin(verde + "1. " + branco + "/automine pos1 " + cinza + "- no primeiro canto");
+            lin(verde + "2. " + branco + "/automine pos2 " + cinza + "- no canto oposto (a area liga sozinha)");
+            lin(verde + "3. " + branco + "/automine " + cinza + "ou " + branco + "/automine escavar");
+            lin(branco + "/automine area on|off|limpar " + cinza + "- liga, desliga ou apaga a area");
+            lin(branco + "/automine escavar " + cinza + "- quebra TODOS os blocos da area, de cima pra baixo");
+            lin(cinza + "A altura (Y) conta. Pra escavar, fique dentro da area, no ponto mais alto.");
+            lin(cinza + "Com a area ligada ele so mina e so anda dentro dela.");
+        } else if (t.equals("ajustes")) {
+            lin(ouro + "--- Ajustes ---");
+            lin(branco + "/automine velocidade 1-6 " + cinza + "- 1 lento ... 6 maximo (padrao 6)");
+            lin(branco + "/automine limite N " + cinza + "- para depois de quebrar N blocos (0 = sem limite)");
+            lin(branco + "/automine multi N " + cinza + "- quantos blocos de uma vez (1 a 500)");
+            lin(branco + "/automine multi on|off " + cinza + "- LIGA ou DESLIGA o multi. Comeca desligado");
+            lin(branco + "/automine trecho S " + cinza + "- segundos andando numa direcao (5-300)");
+            lin(branco + "/automine raio N " + cinza + "- distancia maxima do ponto inicial (10-500)");
+            lin(branco + "/automine status " + cinza + "- mostra tudo que esta configurado");
+            lin(branco + "/automine multimodo igual|qualquer " + cinza + "- quando VOCE quebra: so blocos do mesmo tipo, ou qualquer um");
+            lin(cinza + "O multi so age quando voce liga: comando, tecla N ou botao no Esc/inventario.");
+            lin(cinza + "Funciona com o mod minerando E quando voce mesmo quebra um bloco (mod desligado).");
+        } else if (t.equals("extras")) {
+            lin(ouro + "--- Extras ---");
+            lin(amarelo + "Ver players: " + branco + "tecla P, botao no Esc ou /automine players on|off|lista|linhas|alcance N");
+            lin(amarelo + "Dropar: " + branco + "botao no inventario, tecla K ou /automine dropar [mochila]");
+            lin(amarelo + "Vender: " + branco + "botao no inventario, tecla L ou /automine vender");
+            lin(cinza + "/automine vendermodo enviar|abrir - envia /vender direto ou so abre o chat com ele digitado");
+        } else if (t.equals("teclas")) {
+            lin(ouro + "--- Teclas (mudam em Controles > AutoMine) ---");
+            lin(branco + "M " + cinza + "- liga/desliga o mod");
+            lin(branco + "N " + cinza + "- liga/desliga o multi");
+            lin(branco + "P " + cinza + "- ver players");
+            lin(branco + "K " + cinza + "- dropar inventario");
+            lin(branco + "L " + cinza + "- vender");
+        } else {
+            lin(ouro + "=== AutoMine - AJUDA ===");
+            lin(cinza + "Escolha um assunto:");
+            lin(verde + "/automine ajuda ligar " + cinza + "- ligar e desligar");
+            lin(verde + "/automine ajuda minerar " + cinza + "- o que ele minera");
+            lin(verde + "/automine ajuda area " + cinza + "- demarcar area e escavar");
+            lin(verde + "/automine ajuda ajustes " + cinza + "- velocidade, limite, multi");
+            lin(verde + "/automine ajuda extras " + cinza + "- players, dropar, vender");
+            lin(verde + "/automine ajuda teclas " + cinza + "- todas as teclas");
+            lin(verde + "/automine status " + cinza + "- ajustes atuais");
+        }
     }
 
     // ------------------------------------------------------- ver players
@@ -1042,9 +1203,17 @@ public class AutoMine {
 
     // manda START_DESTROY_BLOCK de ate (multi - 1) blocos extras visiveis ao alcance;
     // depois do tempo de quebra manda o STOP (ver processarPendentes)
-    private void multiQuebra(EntityPlayerSP p, BlockPos principal) {
-        if (multi <= 1) return;
+    // manual = true: voce esta quebrando o bloco "principal" com o mouse/toque; os extras sao os
+    // blocos mais perto dele (do mesmo tipo, ou qualquer um, conforme /automine multimodo)
+    private void multiQuebra(EntityPlayerSP p, BlockPos principal, boolean manual) {
+        if (!multiAtivo()) return;
+        Block blocoPrincipal = mc.theWorld.getBlockState(principal).getBlock();
         int faltam = (multi - 1) - pendentes.size();
+        if (limiteBlocos > 0 && !manual) {
+            // nao deixa os extras passarem do limite (1 = o bloco principal)
+            int resta = limiteBlocos - quebrados - 1 - pendentes.size();
+            if (resta < faltam) faltam = Math.max(0, resta);
+        }
         if (faltam <= 0) return;
 
         Vec3 olhos = new Vec3(p.posX, p.posY + p.getEyeHeight(), p.posZ);
@@ -1057,8 +1226,14 @@ public class AutoMine {
                     BlockPos pos = base.add(dx, dy, dz);
                     if (pos.equals(principal)) continue;
                     Block b = mc.theWorld.getBlockState(pos).getBlock();
-                    if (!minerios.contains(b)) continue;
-                    if (usarArea && !dentroArea(pos)) continue;
+                    if (manual) {
+                        if (b == Blocks.air || b.getMaterial().isLiquid()
+                                || b.getBlockHardness(mc.theWorld, pos) < 0.0f) continue;
+                        if (multiSoIgual && b != blocoPrincipal) continue;
+                    } else {
+                        if (!minerios.contains(b)) continue;
+                        if (usarArea && !dentroArea(pos)) continue;
+                    }
 
                     boolean jaPendente = false;
                     for (Pendente pd : pendentes) {
@@ -1077,7 +1252,8 @@ public class AutoMine {
 
                     MovingObjectPosition r = mc.theWorld.rayTraceBlocks(olhos, centro);
                     if (r != null && r.getBlockPos() != null && r.getBlockPos().equals(pos)) {
-                        achados.add(new Alvo(pos, r.sideHit, d));
+                        // manual: ordena pelos mais colados no bloco que voce quebra
+                        achados.add(new Alvo(pos, r.sideHit, manual ? pos.distanceSq(principal) : d));
                     }
                 }
             }
@@ -1098,7 +1274,7 @@ public class AutoMine {
             ticks = Math.max(1, Math.min(200, ticks));
 
             enviarDig(C07PacketPlayerDigging.Action.START_DESTROY_BLOCK, a.pos, a.face);
-            pendentes.add(new Pendente(a.pos, a.face, ticks));
+            pendentes.add(new Pendente(a.pos, a.face, ticks, b));
             Integer t = tentativas.get(a.pos);
             tentativas.put(a.pos, t == null ? 1 : t + 1);
         }
@@ -1108,8 +1284,9 @@ public class AutoMine {
         for (int i = pendentes.size() - 1; i >= 0; i--) {
             Pendente pd = pendentes.get(i);
             Block b = mc.theWorld.getBlockState(pd.pos).getBlock();
-            if (!minerios.contains(b)) {
+            if (b != pd.tipo) {
                 // ja quebrou (ou sumiu)
+                quebrados++;
                 pendentes.remove(i);
                 tentativas.remove(pd.pos);
                 continue;
@@ -1220,7 +1397,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | escavar | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi <numero> | incluirblocos on/off | players on/off/lista/linhas/alcance | dropar [mochila] | vender | vendermodo enviar/abrir";
+            return "/automine ajuda  (lista os comandos por assunto)";
         }
 
         @Override
@@ -1243,6 +1420,30 @@ public class AutoMine {
             String a = args[0].toLowerCase();
             if (a.equals("parar") || a.equals("off")) {
                 desligar("AutoMine DESLIGADO");
+            } else if (a.equals("ajuda") || a.equals("help") || a.equals("?")) {
+                ajuda(args.length > 1 ? args[1].toLowerCase() : "");
+            } else if (a.equals("status")) {
+                status();
+            } else if (a.equals("limite")) {
+                if (args.length > 1) {
+                    int n = -1;
+                    try {
+                        n = Integer.parseInt(args[1]);
+                    } catch (NumberFormatException ex) {
+                        n = -1;
+                    }
+                    if (n >= 0 && n <= 10000000) {
+                        limiteBlocos = n;
+                        msg(n == 0 ? "Limite desligado (sem limite)."
+                                : "Limite: para depois de quebrar " + n + " blocos (conta de novo a cada vez que voce liga).");
+                    } else {
+                        msg("Uso: /automine limite <numero>  (0 = sem limite)");
+                    }
+                } else {
+                    msg("Limite: " + (limiteBlocos == 0 ? "sem limite" : limiteBlocos + " blocos")
+                            + " | quebrados nesta rodada: " + quebrados);
+                    msg("Uso: /automine limite <numero>  (0 = sem limite)");
+                }
             } else if (a.equals("pos1") || a.equals("pos2")) {
                 EntityPlayerSP pl = mc.thePlayer;
                 BlockPos aqui = new BlockPos(pl.posX, pl.posY, pl.posZ);
@@ -1356,25 +1557,40 @@ public class AutoMine {
                 // /automine dropar mochila  -> so a mochila, mantem a hotbar
                 boolean soMochila = args.length > 1 && args[1].equalsIgnoreCase("mochila");
                 droparInventario(!soMochila);
+            } else if (a.equals("multimodo")) {
+                String o = args.length > 1 ? args[1].toLowerCase() : "";
+                if (o.equals("igual")) {
+                    multiSoIgual = true;
+                    msg("Multi (quando VOCE quebra): so blocos do mesmo tipo do que voce quebra.");
+                } else if (o.equals("qualquer")) {
+                    multiSoIgual = false;
+                    msg("Multi (quando VOCE quebra): qualquer bloco por perto.");
+                } else {
+                    msg("Multimodo: " + (multiSoIgual ? "igual" : "qualquer") + ". Uso: /automine multimodo igual | qualquer");
+                }
             } else if (a.equals("multi")) {
-                int n = -1;
-                if (args.length > 1) {
+                String o = args.length > 1 ? args[1].toLowerCase() : "";
+                if (o.equals("on") || o.equals("ligar")) {
+                    alternarMulti(true);
+                } else if (o.equals("off") || o.equals("desligar")) {
+                    alternarMulti(false);
+                } else if (o.length() > 0) {
+                    int n = -1;
                     try {
-                        n = Integer.parseInt(args[1]);
+                        n = Integer.parseInt(o);
                     } catch (NumberFormatException ex) {
                         n = -1;
                     }
-                }
-                if (n >= 1 && n <= MULTI_MAX) {
-                    multi = n;
-                    if (n == 1) {
-                        cancelarPendentes();
-                        msg("Multi-quebra desligada (1 bloco por vez).");
+                    if (n >= 1 && n <= MULTI_MAX) {
+                        multi = n;
+                        msg("Quantidade do multi: " + n + " blocos. O multi esta "
+                                + (multiLigado ? "LIGADO." : "DESLIGADO - ligue com /automine multi on, tecla N ou botao no Esc."));
                     } else {
-                        msg("Multi-quebra: " + n + " blocos de uma vez. Em survival o servidor pode ignorar os extras.");
+                        msg("Uso: /automine multi <1-" + MULTI_MAX + "> (quantidade) | multi on | multi off");
                     }
                 } else {
-                    msg("Uso: /automine multi <1-" + MULTI_MAX + ">  (1 = desligado)");
+                    msg("Multi: " + (multiLigado ? "LIGADO" : "desligado") + ", quantidade " + multi);
+                    msg("Uso: /automine multi <1-" + MULTI_MAX + "> (quantidade) | multi on | multi off");
                 }
             } else if (a.equals("trecho") || a.equals("raio") || a.equals("velocidade")) {
                 int n = -1;
@@ -1406,7 +1622,7 @@ public class AutoMine {
                     ligar();
                     msg("Minerando: " + f);
                 } else {
-                    msg("Uso: " + getCommandUsage(sender));
+                    msg("Minerio desconhecido. Digite /automine ajuda minerar");
                 }
             } else if (definirFiltro(a)) {
                 modoTunel = false;
@@ -1414,7 +1630,7 @@ public class AutoMine {
                 ligar();
                 msg("Minerando: " + a);
             } else {
-                msg("Uso: " + getCommandUsage(sender));
+                msg("Comando desconhecido. Digite /automine ajuda");
             }
         }
     }
