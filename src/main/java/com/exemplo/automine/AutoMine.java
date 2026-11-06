@@ -12,6 +12,7 @@ import java.util.Random;
 import java.util.Set;
 
 import org.lwjgl.input.Keyboard;
+import org.lwjgl.opengl.GL11;
 
 import net.minecraft.block.Block;
 import net.minecraft.client.Minecraft;
@@ -20,10 +21,13 @@ import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiChat;
 import net.minecraft.client.gui.GuiIngameMenu;
 import net.minecraft.client.gui.inventory.GuiInventory;
+import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.command.CommandBase;
 import net.minecraft.command.CommandException;
 import net.minecraft.command.ICommandSender;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.Blocks;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.play.client.C07PacketPlayerDigging;
@@ -36,6 +40,7 @@ import net.minecraft.util.Vec3;
 import net.minecraftforge.client.ClientCommandHandler;
 import net.minecraftforge.client.event.GuiScreenEvent;
 import net.minecraftforge.client.event.RenderGameOverlayEvent;
+import net.minecraftforge.client.event.RenderWorldLastEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.client.registry.ClientRegistry;
 import net.minecraftforge.fml.common.Mod;
@@ -68,6 +73,10 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *                       Nao dropa armadura. Dropa alguns slots por tick.
  *   Ligar/desligar sem digitar: botao "Ligar AutoMine" no menu de pausa (Esc) e botao "Ligar mod"
  *           na tela do inventario; tecla M tambem. Aparece um aviso verde na tela enquanto esta ligado.
+ *   Ver players por perto: tecla P ou botao "Ver players" no menu de pausa (Esc) liga/desliga
+ *           a lista (nome + distancia) e as linhas ate cada player (aparecem atraves das paredes).
+ *           /automine players on|off|lista|linhas|alcance <10-300>  (padrao 64 blocos)
+ *           So mostra quem o seu jogo ja carregou (o servidor nao manda players muito longe).
  *   Vender: botao "Vender" na tela do inventario, tecla L ou /automine vender -> manda /vender.
  *           /automine vendermodo abrir -> em vez de enviar, so abre o chat com /vender digitado.
  *   /automine multi 3        -> tenta quebrar ate 3 blocos de uma vez (qualquer numero de 1 a 500; 1 = desligado).
@@ -139,6 +148,13 @@ public class AutoMine {
     private static final int DROP_POR_TICK = 3;
     private static final int BTN_VENDER = 9002;
     private static final int BTN_TOGGLE = 9003;
+    private static final int BTN_PLAYERS = 9004;
+
+    // ver players por perto: lista na tela + linhas ate cada um (aparecem atraves das paredes)
+    private boolean listaPlayers = false;
+    private boolean linhasPlayers = false;
+    private int alcancePlayers = 64;
+    private KeyBinding teclaPlayers;
     private KeyBinding teclaVender;
     private boolean venderEnviar = true; // true = envia /vender direto; false = so abre o chat com o texto
     private KeyBinding teclaDropar;
@@ -218,6 +234,8 @@ public class AutoMine {
         ClientRegistry.registerKeyBinding(teclaDropar);
         teclaVender = new KeyBinding("Vender (/vender)", Keyboard.KEY_L, "AutoMine");
         ClientRegistry.registerKeyBinding(teclaVender);
+        teclaPlayers = new KeyBinding("Ver players por perto", Keyboard.KEY_P, "AutoMine");
+        ClientRegistry.registerKeyBinding(teclaPlayers);
         ClientCommandHandler.instance.registerCommand(new CommandAutoMine());
         MinecraftForge.EVENT_BUS.register(this);
         definirFiltro("tudo");
@@ -343,6 +361,10 @@ public class AutoMine {
 
         if (teclaDropar.isPressed()) droparInventario(true);
         if (teclaVender.isPressed()) vender();
+        if (teclaPlayers.isPressed()) {
+            alternarPlayers();
+            msg("Ver players: " + (listaPlayers ? "LIGADO" : "desligado"));
+        }
         processarFilaDrop();
 
         if (teclaToggle.isPressed()) {
@@ -654,6 +676,7 @@ public class AutoMine {
         if (ev.gui instanceof GuiIngameMenu) {
             // menu de pausa (Esc): botao grande no canto de cima
             ev.buttonList.add(new GuiButton(BTN_TOGGLE, 4, 4, 130, 20, textoToggle()));
+            ev.buttonList.add(new GuiButton(BTN_PLAYERS, 4, 28, 130, 20, textoPlayers()));
             return;
         }
         if (ev.gui instanceof GuiInventory) {
@@ -665,6 +688,12 @@ public class AutoMine {
 
     @SubscribeEvent
     public void aoClicarBotao(GuiScreenEvent.ActionPerformedEvent.Post ev) {
+        if (ev.button.id == BTN_PLAYERS && ev.gui instanceof GuiIngameMenu) {
+            // liga/desliga e deixa o menu aberto, so troca o texto do botao
+            alternarPlayers();
+            ev.button.displayString = textoPlayers();
+            return;
+        }
         if (ev.button.id == BTN_TOGGLE && (ev.gui instanceof GuiInventory || ev.gui instanceof GuiIngameMenu)) {
             alternar();
             return;
@@ -691,9 +720,108 @@ public class AutoMine {
     // aviso verde no canto da tela enquanto o mod esta ligado
     @SubscribeEvent
     public void aoDesenharHud(RenderGameOverlayEvent.Post ev) {
-        if (ev.type != RenderGameOverlayEvent.ElementType.ALL || !ativo) return;
-        String t = "AutoMine: LIGADO" + (usarArea ? " | area" : "") + (multi > 1 ? " | multi " + multi : "");
-        mc.fontRendererObj.drawStringWithShadow(t, 4.0f, 4.0f, 0x55FF55);
+        if (ev.type != RenderGameOverlayEvent.ElementType.ALL) return;
+        int y = 4;
+        if (ativo) {
+            String t = "AutoMine: LIGADO" + (usarArea ? " | area" : "") + (multi > 1 ? " | multi " + multi : "");
+            mc.fontRendererObj.drawStringWithShadow(t, 4.0f, (float) y, 0x55FF55);
+            y += 12;
+        }
+        desenharLista(y);
+    }
+
+    // ------------------------------------------------------- ver players
+
+    private void alternarPlayers() {
+        boolean ligar = !(listaPlayers || linhasPlayers);
+        listaPlayers = ligar;
+        linhasPlayers = ligar;
+    }
+
+    private String textoPlayers() {
+        return (listaPlayers || linhasPlayers) ? "Ver players: LIGADO" : "Ver players: desligado";
+    }
+
+    // lista no canto da tela: nome e distancia, do mais perto pro mais longe
+    private void desenharLista(int y) {
+        if (!listaPlayers || mc.theWorld == null || mc.thePlayer == null) return;
+        final EntityPlayerSP eu = mc.thePlayer;
+
+        List<EntityPlayer> perto = new ArrayList<EntityPlayer>();
+        for (EntityPlayer pl : mc.theWorld.playerEntities) {
+            if (pl == eu) continue;
+            if (eu.getDistanceToEntity(pl) <= alcancePlayers) perto.add(pl);
+        }
+        Collections.sort(perto, new Comparator<EntityPlayer>() {
+            @Override
+            public int compare(EntityPlayer a, EntityPlayer b) {
+                return Double.compare(eu.getDistanceToEntity(a), eu.getDistanceToEntity(b));
+            }
+        });
+
+        if (perto.isEmpty()) {
+            mc.fontRendererObj.drawStringWithShadow("Players perto: nenhum", 4.0f, (float) y, 0xAAAAAA);
+            return;
+        }
+        mc.fontRendererObj.drawStringWithShadow("Players perto (" + perto.size() + "):", 4.0f, (float) y, 0xFFFF55);
+        y += 11;
+        for (int i = 0; i < perto.size() && i < 8; i++) {
+            EntityPlayer pl = perto.get(i);
+            int d = (int) eu.getDistanceToEntity(pl);
+            int cor = d < 15 ? 0xFF5555 : (d < 35 ? 0xFFAA00 : 0xFFFFFF);
+            mc.fontRendererObj.drawStringWithShadow(pl.getName() + "  " + d + "m", 4.0f, (float) y, cor);
+            y += 10;
+        }
+    }
+
+    // linha da mira ate cada player (vermelha = perto, verde = longe), vista atraves das paredes
+    @SubscribeEvent
+    public void aoRenderMundo(RenderWorldLastEvent ev) {
+        if (!linhasPlayers || mc.theWorld == null || mc.thePlayer == null) return;
+        Entity viewer = mc.getRenderViewEntity();
+        if (viewer == null) return;
+        float pt = ev.partialTicks;
+
+        double vx = viewer.lastTickPosX + (viewer.posX - viewer.lastTickPosX) * pt;
+        double vy = viewer.lastTickPosY + (viewer.posY - viewer.lastTickPosY) * pt;
+        double vz = viewer.lastTickPosZ + (viewer.posZ - viewer.lastTickPosZ) * pt;
+        Vec3 look = viewer.getLook(pt);
+        double sx = vx + look.xCoord;
+        double sy = vy + viewer.getEyeHeight() + look.yCoord;
+        double sz = vz + look.zCoord;
+
+        GlStateManager.pushMatrix();
+        GlStateManager.translate(-vx, -vy, -vz);
+        GlStateManager.disableTexture2D();
+        GlStateManager.disableDepth();
+        GlStateManager.disableLighting();
+        GlStateManager.enableBlend();
+        GlStateManager.tryBlendFuncSeparate(770, 771, 1, 0);
+        GL11.glLineWidth(2.0f);
+
+        for (EntityPlayer pl : mc.theWorld.playerEntities) {
+            if (pl == mc.thePlayer || pl.isDead) continue;
+            double dist = mc.thePlayer.getDistanceToEntity(pl);
+            if (dist > alcancePlayers) continue;
+
+            double px = pl.lastTickPosX + (pl.posX - pl.lastTickPosX) * pt;
+            double py = pl.lastTickPosY + (pl.posY - pl.lastTickPosY) * pt + pl.height / 2.0;
+            double pz = pl.lastTickPosZ + (pl.posZ - pl.lastTickPosZ) * pt;
+
+            float f = (float) Math.min(1.0, dist / alcancePlayers);
+            GlStateManager.color(1.0f - f, f, 0.0f, 0.9f);
+            GL11.glBegin(GL11.GL_LINES);
+            GL11.glVertex3d(sx, sy, sz);
+            GL11.glVertex3d(px, py, pz);
+            GL11.glEnd();
+        }
+
+        GlStateManager.color(1.0f, 1.0f, 1.0f, 1.0f);
+        GlStateManager.disableBlend();
+        GlStateManager.enableLighting();
+        GlStateManager.enableDepth();
+        GlStateManager.enableTexture2D();
+        GlStateManager.popMatrix();
     }
 
     // manda /vender pro servidor (ou so abre o chat com /vender digitado, conforme o modo)
@@ -895,7 +1023,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi <numero> | incluirblocos on/off | dropar [mochila] | vender | vendermodo enviar/abrir";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi <numero> | incluirblocos on/off | players on/off/lista/linhas/alcance | dropar [mochila] | vender | vendermodo enviar/abrir";
         }
 
         @Override
@@ -952,6 +1080,43 @@ public class AutoMine {
                 } else {
                     msg("Area: " + descricaoArea());
                     msg("Uso: /automine area on | off | limpar");
+                }
+            } else if (a.equals("players")) {
+                String o = args.length > 1 ? args[1].toLowerCase() : "";
+                if (o.equals("lista")) {
+                    listaPlayers = !listaPlayers;
+                    msg("Lista de players: " + (listaPlayers ? "LIGADA" : "desligada"));
+                } else if (o.equals("linhas")) {
+                    linhasPlayers = !linhasPlayers;
+                    msg("Linhas ate os players: " + (linhasPlayers ? "LIGADAS" : "desligadas"));
+                } else if (o.equals("on") || o.equals("tudo")) {
+                    listaPlayers = true;
+                    linhasPlayers = true;
+                    msg("Ver players: lista e linhas LIGADAS (alcance " + alcancePlayers + ").");
+                } else if (o.equals("off")) {
+                    listaPlayers = false;
+                    linhasPlayers = false;
+                    msg("Ver players desligado.");
+                } else if (o.equals("alcance")) {
+                    int n = -1;
+                    if (args.length > 2) {
+                        try {
+                            n = Integer.parseInt(args[2]);
+                        } catch (NumberFormatException ex) {
+                            n = -1;
+                        }
+                    }
+                    if (n >= 10 && n <= 300) {
+                        alcancePlayers = n;
+                        msg("Alcance pra ver players: " + n + " blocos.");
+                    } else {
+                        msg("Uso: /automine players alcance <10-300>");
+                    }
+                } else {
+                    msg("Players: lista " + (listaPlayers ? "LIGADA" : "desligada")
+                            + ", linhas " + (linhasPlayers ? "LIGADAS" : "desligadas")
+                            + ", alcance " + alcancePlayers);
+                    msg("Uso: /automine players on | off | lista | linhas | alcance <n>");
                 }
             } else if (a.equals("incluirblocos")) {
                 String o = args.length > 1 ? args[1].toLowerCase() : "";
