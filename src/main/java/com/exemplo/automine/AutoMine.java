@@ -61,6 +61,10 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *                               "blocos" quebra so os blocos compactos (sem minerios);
  *                               "blocolapis" quebra so o bloco de lapis
  *   /automine tunel [minerio] -> modo tunel: cava em linha reta (quebra tudo na frente)
+ *   /automine escavar        -> quebra TODOS os blocos da area demarcada (pos1/pos2), qualquer tipo,
+ *                               de cima pra baixo. Fique dentro da area, de preferencia no ponto mais
+ *                               alto. Pula bedrock/inquebraveis e blocos encostados em agua/lava.
+ *                               Desliga sozinho quando a area fica limpa. (multi nao vale aqui)
  *   /automine trecho 30      -> segundos andando numa direcao antes de trocar (padrao 30)
  *   /automine raio 64        -> distancia maxima do ponto onde voce ligou (padrao 64)
  *   /automine pos1           -> marca o 1o canto da area (onde voce esta parado)
@@ -114,6 +118,8 @@ public class AutoMine {
     private final Set<Block> minerios = new HashSet<Block>();
     private boolean incluirBlocos = false; // minera os blocos compactos? (padrao: nao)
     private String filtroAtual = "tudo";
+    private boolean modoEscavar = false;   // quebra TODOS os blocos da area demarcada
+    private BlockPos ultimoAlvoEscavar = null;
 
     // estado do modo andando
     private float yawAlvo = 0.0f;
@@ -308,7 +314,9 @@ public class AutoMine {
         ultX = p.posX;
         ultZ = p.posZ;
         ativo = true;
-        msg("AutoMine LIGADO (" + (modoTunel ? "tunel, direcao " + direcao.getName() : "andando") + ")");
+        ultimoAlvoEscavar = null;
+        msg("AutoMine LIGADO (" + (modoEscavar ? "escavando a area"
+                : (modoTunel ? "tunel, direcao " + direcao.getName() : "andando")) + ")");
         if (usarArea) {
             msg("Area: " + descricaoArea());
             if (!dentroXZ(p.posX, p.posZ)) msg("Voce esta fora da area, vou andar ate ela.");
@@ -391,7 +399,8 @@ public class AutoMine {
 
         if (multi > 1) processarPendentes();
 
-        if (modoTunel) tickTunel(p);
+        if (modoEscavar) tickEscavar(p);
+        else if (modoTunel) tickTunel(p);
         else tickAndar(p);
     }
 
@@ -567,6 +576,193 @@ public class AutoMine {
         return (float) (Math.atan2(dz, dx) * 180.0 / Math.PI) - 90.0f;
     }
 
+    // ----------------------------------------------- modo escavar a area
+
+    // bloco que pode ser quebrado no modo escavar: qualquer um, menos ar, liquido, inquebravel
+    // (bedrock etc.) e blocos encostados em agua/lava (pra nao inundar a area)
+    private boolean escavavel(BlockPos pos) {
+        Block b = mc.theWorld.getBlockState(pos).getBlock();
+        if (b == Blocks.air) return false;
+        if (b.getMaterial().isLiquid()) return false;
+        if (b.getBlockHardness(mc.theWorld, pos) < 0.0f) return false;
+        for (EnumFacing f : EnumFacing.values()) {
+            if (liquido(pos.offset(f))) return false;
+        }
+        return true;
+    }
+
+    // so quebra o bloco debaixo dos pes se o buraco de baixo for seguro (sem liquido, sem queda grande)
+    private boolean chaoSeguro(BlockPos pe) {
+        if (liquido(pe.down(2)) || liquido(pe.down(3))) return false;
+        return !(mc.theWorld.isAirBlock(pe.down(2))
+                && mc.theWorld.isAirBlock(pe.down(3))
+                && mc.theWorld.isAirBlock(pe.down(4)));
+    }
+
+    // proximo bloco da area ao alcance e visivel: de cima pra baixo, do mais perto pro mais longe
+    private BlockPos acharBlocoEscavar(EntityPlayerSP p) {
+        Vec3 olhos = new Vec3(p.posX, p.posY + p.getEyeHeight(), p.posZ);
+        BlockPos base = new BlockPos(p.posX, p.posY + p.getEyeHeight(), p.posZ);
+        BlockPos pe = new BlockPos(p.posX, p.posY, p.posZ);
+        BlockPos melhor = null;
+        double melhorScore = -Double.MAX_VALUE;
+
+        for (int dx = -RAIO_BUSCA; dx <= RAIO_BUSCA; dx++) {
+            for (int dy = -RAIO_BUSCA; dy <= RAIO_BUSCA; dy++) {
+                for (int dz = -RAIO_BUSCA; dz <= RAIO_BUSCA; dz++) {
+                    BlockPos pos = base.add(dx, dy, dz);
+                    Vec3 centro = new Vec3(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+                    double d = olhos.distanceTo(centro);
+                    if (d > ALCANCE) continue;
+
+                    double score = pos.getY() * 1000.0 - d;
+                    if (score <= melhorScore) continue;
+                    if (!dentroArea(pos)) continue;
+                    if (!escavavel(pos)) continue;
+                    if (pos.equals(pe.down()) && !chaoSeguro(pe)) continue;
+
+                    MovingObjectPosition r = mc.theWorld.rayTraceBlocks(olhos, centro);
+                    if (r != null && r.getBlockPos() != null && r.getBlockPos().equals(pos)) {
+                        melhor = pos;
+                        melhorScore = score;
+                    }
+                }
+            }
+        }
+        return melhor;
+    }
+
+    // proximo bloco que ainda falta na area (mesmo fora do alcance), pra saber pra onde andar.
+    // Areas muito grandes: so olha 20 blocos em volta de voce.
+    private BlockPos acharProximoEscavar(EntityPlayerSP p) {
+        int x0 = aMinX, x1 = aMaxX, y0 = aMinY, y1 = aMaxY, z0 = aMinZ, z1 = aMaxZ;
+        long vol = (long) (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1);
+        if (vol > 60000L) {
+            int px = (int) Math.floor(p.posX);
+            int py = (int) Math.floor(p.posY);
+            int pz = (int) Math.floor(p.posZ);
+            x0 = Math.max(x0, px - 20);
+            x1 = Math.min(x1, px + 20);
+            y0 = Math.max(y0, py - 20);
+            y1 = Math.min(y1, py + 20);
+            z0 = Math.max(z0, pz - 20);
+            z1 = Math.min(z1, pz + 20);
+        }
+
+        BlockPos melhor = null;
+        double melhorScore = -Double.MAX_VALUE;
+        for (int x = x0; x <= x1; x++) {
+            for (int z = z0; z <= z1; z++) {
+                double dh = Math.hypot(x + 0.5 - p.posX, z + 0.5 - p.posZ);
+                for (int y = y0; y <= y1; y++) {
+                    double score = y * 1000.0 - dh;
+                    if (y > p.posY + 2) score -= 100000.0; // acima do alcance: por ultimo
+                    if (score <= melhorScore) continue;
+                    BlockPos pos = new BlockPos(x, y, z);
+                    if (!escavavel(pos)) continue;
+                    melhor = pos;
+                    melhorScore = score;
+                }
+            }
+        }
+        return melhor;
+    }
+
+    private void tickEscavar(EntityPlayerSP p) {
+        if (!usarArea) {
+            desligar("Defina a area antes com /automine pos1 e /automine pos2.");
+            return;
+        }
+        if (p.isInLava()) {
+            desligar("Lava! Parei.");
+            return;
+        }
+        if (!dentroXZ(p.posX, p.posZ)) {
+            desligar("Fique dentro da area pra escavar (de preferencia no ponto mais alto).");
+            return;
+        }
+
+        pular(puloAuto);
+
+        // acabou de quebrar o alvo: pequena pausa conforme a velocidade
+        if (ultimoAlvoEscavar != null && mc.theWorld.isAirBlock(ultimoAlvoEscavar)) {
+            pausaTicks = PAUSA_BLOCO[nivelVel - 1];
+            ultimoAlvoEscavar = null;
+        }
+        if (pausaTicks > 0) {
+            pausaTicks--;
+            atacar(false);
+            andar(false);
+            return;
+        }
+
+        // 1) bloco ao alcance: quebra
+        BlockPos alvo = acharBlocoEscavar(p);
+        if (alvo != null) {
+            andar(false);
+            boolean alinhado = mirarSuave(p, alvo);
+            escolherFerramenta(p, alvo);
+            if (!alinhado) {
+                esperaMira = ESPERA_MIRA[nivelVel - 1];
+                atacar(false);
+            } else if (esperaMira > 0) {
+                esperaMira--;
+                atacar(false);
+            } else {
+                atacar(true);
+            }
+            ultimoAlvoEscavar = alvo;
+            ticksParado = 0;
+            ultX = p.posX;
+            ultZ = p.posZ;
+            return;
+        }
+        atacar(false);
+
+        // 2) nada ao alcance: acha o proximo que falta e anda ate la
+        ticksVarredura++;
+        if (alvoLonge == null || ticksVarredura >= 20 || mc.theWorld.isAirBlock(alvoLonge)) {
+            ticksVarredura = 0;
+            alvoLonge = acharProximoEscavar(p);
+            if (alvoLonge == null) {
+                modoEscavar = false; // volta ao modo normal pra proxima vez que ligar
+                desligar("Area limpa, terminei. (Blocos encostados em agua/lava e inquebraveis foram pulados.)");
+                return;
+            }
+        }
+
+        double mov = Math.hypot(p.posX - ultX, p.posZ - ultZ);
+        ultX = p.posX;
+        ultZ = p.posZ;
+        if (mov < 0.01) ticksParado++;
+        else ticksParado = 0;
+        if (ticksParado > 100) {
+            desligar("Nao consigo alcancar o resto da area. Va pro ponto mais alto da area e ligue de novo.");
+            return;
+        }
+
+        double dh = Math.hypot(alvoLonge.getX() + 0.5 - p.posX, alvoLonge.getZ() + 0.5 - p.posZ);
+        yawAlvo = yawPara(p, alvoLonge);
+        double rad = Math.toRadians(yawAlvo);
+        BlockPos pe = new BlockPos(p.posX, p.posY, p.posZ);
+        BlockPos frente = new BlockPos(p.posX - Math.sin(rad), p.posY, p.posZ + Math.cos(rad));
+
+        boolean seguro = !liquido(frente) && !liquido(frente.down()) && !liquido(frente.up())
+                && !(mc.theWorld.isAirBlock(frente.down())
+                && mc.theWorld.isAirBlock(frente.down(2))
+                && mc.theWorld.isAirBlock(frente.down(3)));
+        boolean livre = seguro && passavel(frente) && passavel(frente.up());
+        boolean degrau = seguro && !passavel(frente) && passavel(frente.up())
+                && passavel(frente.up(2)) && passavel(pe.up(2));
+        boolean dentro = dentroXZ(frente.getX() + 0.5, frente.getZ() + 0.5);
+
+        float dif = MathHelper.wrapAngleTo180_float(yawAlvo - p.rotationYaw);
+        suavizar(p);
+        // perto demais na horizontal (alvo logo acima/abaixo): nao fica andando a toa
+        andar(dh > 1.2 && (livre || degrau) && dentro && Math.abs(dif) < 60.0f);
+        pular(degrau || puloAuto);
+    }
+
     // ------------------------------------------------------- modo tunel
 
     private void tickTunel(EntityPlayerSP p) {
@@ -723,7 +919,8 @@ public class AutoMine {
         if (ev.type != RenderGameOverlayEvent.ElementType.ALL) return;
         int y = 4;
         if (ativo) {
-            String t = "AutoMine: LIGADO" + (usarArea ? " | area" : "") + (multi > 1 ? " | multi " + multi : "");
+            String t = "AutoMine: LIGADO" + (usarArea ? " | area" : "") + (multi > 1 ? " | multi " + multi : "")
+                    + (modoEscavar ? " | escavando" : "");
             mc.fontRendererObj.drawStringWithShadow(t, 4.0f, (float) y, 0x55FF55);
             y += 12;
         }
@@ -1023,7 +1220,7 @@ public class AutoMine {
 
         @Override
         public String getCommandUsage(ICommandSender sender) {
-            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi <numero> | incluirblocos on/off | players on/off/lista/linhas/alcance | dropar [mochila] | vender | vendermodo enviar/abrir";
+            return "/automine [tudo|diamante|ferro|ouro|carvao|redstone|lapis|blocolapis|blocos|esmeralda|quartzo|parar] ou /automine tunel [minerio] | escavar | pos1 | pos2 | area on/off/limpar | velocidade 1-6 | multi <numero> | incluirblocos on/off | players on/off/lista/linhas/alcance | dropar [mochila] | vender | vendermodo enviar/abrir";
         }
 
         @Override
@@ -1080,6 +1277,16 @@ public class AutoMine {
                 } else {
                     msg("Area: " + descricaoArea());
                     msg("Uso: /automine area on | off | limpar");
+                }
+            } else if (a.equals("escavar")) {
+                if (pos1 == null || pos2 == null) {
+                    msg("Defina a area antes: /automine pos1 e /automine pos2.");
+                } else {
+                    atualizarArea();
+                    usarArea = true;
+                    modoEscavar = true;
+                    modoTunel = false;
+                    ligar();
                 }
             } else if (a.equals("players")) {
                 String o = args.length > 1 ? args[1].toLowerCase() : "";
@@ -1195,6 +1402,7 @@ public class AutoMine {
                 String f = args.length > 1 ? args[1].toLowerCase() : "tudo";
                 if (definirFiltro(f)) {
                     modoTunel = true;
+                    modoEscavar = false;
                     ligar();
                     msg("Minerando: " + f);
                 } else {
@@ -1202,6 +1410,7 @@ public class AutoMine {
                 }
             } else if (definirFiltro(a)) {
                 modoTunel = false;
+                modoEscavar = false;
                 ligar();
                 msg("Minerando: " + a);
             } else {
