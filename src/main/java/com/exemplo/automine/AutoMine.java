@@ -25,6 +25,8 @@ import org.lwjgl.opengl.GL11;
 import net.minecraft.block.Block;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityPlayerSP;
+import net.minecraft.client.multiplayer.PlayerControllerMP;
+import net.minecraftforge.fml.relauncher.ReflectionHelper;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiChat;
 import net.minecraft.client.gui.GuiIngameMenu;
@@ -69,8 +71,6 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *   /automine incluirblocos on|off  -> tambem quebra blocos compactos (padrao: off)
  *   /automine blocos | blocolapis   -> so blocos compactos
  *   /automine tunel [minerio]       -> cava em linha reta
- *   /automine manual [minerio]      -> VOCE anda e olha; ele so mira e quebra os minerios ao alcance
- *   /automine manual escavar        -> VOCE anda; ele quebra qualquer bloco da area ao alcance
  *
  * AREA DEMARCADA
  *   /automine pos1 | pos2           -> marca os cantos (a area liga sozinha; a altura Y conta)
@@ -81,6 +81,7 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  * AJUSTES
  *   /automine velocidade 1-6        -> 1 = lento ... 6 = maximo (padrao 6)
  *   /automine limite N              -> para depois de quebrar N blocos (0 = sem limite)
+ *   /automine turbo on|off          -> mineracao acelerada (padrao on)
  *   /automine multi N               -> quantos blocos de uma vez (1 a 500)
  *   /automine multi on|off          -> LIGA/DESLIGA o multi (tecla N ou botao). Comeca desligado.
  *   /automine trecho S | raio N     -> segundos por direcao | distancia maxima do ponto inicial
@@ -122,10 +123,9 @@ public class AutoMine {
     private final Set<Block> minerios = new HashSet<Block>();
     private boolean incluirBlocos = false; // minera os blocos compactos? (padrao: nao)
     private String filtroAtual = "tudo";
-    private boolean modoManual = false;    // VOCE anda e olha; o mod so mira e quebra o que esta ao alcance
-    private boolean manualEscavar = false; // no manual: quebra qualquer bloco da area (em vez de so minerios)
-    private boolean manualAtacando = false;
     private boolean modoEscavar = false;   // quebra TODOS os blocos da area demarcada
+    private boolean turbo = true;          // mineracao acelerada (sem atraso entre blocos, quebra aos 70%)
+    private boolean turboFalhou = false;
     private BlockPos ultimoAlvoEscavar = null;
     private int camadaEscavar = Integer.MIN_VALUE; // altura (Y) da camada que esta sendo limpa
 
@@ -352,8 +352,7 @@ public class AutoMine {
         quebrados = 0;
         alvoContagem = null;
         camadaEscavar = Integer.MIN_VALUE;
-        manualAtacando = false;
-        msg("AutoMine LIGADO (" + (modoManual ? "manual: voce anda, ele quebra" : modoEscavar ? "escavando a area"
+        msg("AutoMine LIGADO (" + (modoEscavar ? "escavando a area"
                 : (modoTunel ? "tunel, direcao " + direcao.getName() : "andando")) + ")");
         if (usarArea) {
             msg("Area: " + descricaoArea());
@@ -428,6 +427,7 @@ public class AutoMine {
             if (ativo) desligar("AutoMine DESLIGADO");
             else ligar();
         }
+        if (turbo && !turboFalhou) aplicarTurbo();
         // macro: grava cada tick do que voce faz / repete o que foi gravado
         if (gravando) gravarFrame(mc.thePlayer);
         if (reproduzindo) {
@@ -469,8 +469,7 @@ public class AutoMine {
             return;
         }
 
-        if (modoManual) tickManual(p);
-        else if (modoEscavar) tickEscavar(p);
+        if (modoEscavar) tickEscavar(p);
         else if (modoTunel) tickTunel(p);
         else tickAndar(p);
     }
@@ -648,62 +647,6 @@ public class AutoMine {
         return (float) (Math.atan2(dz, dx) * 180.0 / Math.PI) - 90.0f;
     }
 
-    // ------------------------------------------------------ modo manual
-    // Voce anda e olha; o mod so mira e quebra o que estiver ao alcance. Nao mexe nas teclas de
-    // andar/pular. A camera so vira quando ha um bloco pra quebrar.
-
-    private void tickManual(EntityPlayerSP p) {
-        if (p.isInLava()) {
-            desligar("Lava! Parei.");
-            return;
-        }
-        if (manualEscavar && !usarArea) {
-            desligar("Defina a area antes com /automine pos1 e /automine pos2.");
-            return;
-        }
-
-        // acabou de quebrar o alvo: pausa curta conforme a velocidade
-        if (ultimoAlvoEscavar != null && mc.theWorld.isAirBlock(ultimoAlvoEscavar)) {
-            pausaTicks = PAUSA_BLOCO[nivelVel - 1];
-            ultimoAlvoEscavar = null;
-        }
-        if (pausaTicks > 0) pausaTicks--;
-
-        BlockPos alvo = null;
-        if (pausaTicks == 0) {
-            if (manualEscavar) {
-                camadaEscavar = Integer.MIN_VALUE; // sem camada: o que estiver ao alcance, de cima pra baixo
-                alvo = acharBlocoEscavar(p);
-            } else {
-                alvo = acharMinerio(p, RAIO_BUSCA, ALCANCE);
-            }
-        }
-
-        if (alvo == null) {
-            // sem alvo: solta o "bater" so se foi o mod que apertou (nao atrapalha o seu toque)
-            if (manualAtacando) {
-                atacar(false);
-                manualAtacando = false;
-            }
-            return;
-        }
-
-        boolean alinhado = mirarSuave(p, alvo);
-        escolherFerramenta(p, alvo);
-        boolean bater = alinhado;
-        if (!alinhado) {
-            esperaMira = ESPERA_MIRA[nivelVel - 1];
-        } else if (esperaMira > 0) {
-            esperaMira--;
-            bater = false;
-        }
-        atacar(bater);
-        manualAtacando = true;
-        ultimoAlvoEscavar = alvo;
-        alvoContagem = alvo;
-        if (alinhado && !manualEscavar) multiQuebra(p, alvo, false);
-    }
-
     // ----------------------------------------------- modo escavar a area
 
     // bloco que pode ser quebrado no modo escavar: qualquer um, menos ar, liquido, inquebravel
@@ -750,8 +693,7 @@ public class AutoMine {
                     if (score <= melhorScore) continue;
                     if (!dentroArea(pos)) continue;
                     if (!escavavel(pos)) continue;
-                    // no manual nunca quebra o chao onde voce esta (quem decide e voce)
-                    if (pos.equals(pe.down()) && (modoManual || !chaoSeguro(pe))) continue;
+                    if (pos.equals(pe.down()) && !chaoSeguro(pe)) continue;
 
                     MovingObjectPosition r = mc.theWorld.rayTraceBlocks(olhos, centro);
                     if (r != null && r.getBlockPos() != null && r.getBlockPos().equals(pos)) {
@@ -1121,7 +1063,6 @@ public class AutoMine {
         if (ativo) {
             String t = "AutoMine: LIGADO" + (usarArea ? " | area" : "") + (multiAtivo() ? " | multi " + multi : "")
                     + (limiteBlocos > 0 ? " | " + quebrados + "/" + limiteBlocos : "")
-                    + (modoManual ? " | manual" : "")
                     + (modoEscavar ? " | escavando" : "");
             mc.fontRendererObj.drawStringWithShadow(t, 4.0f, (float) y, 0x55FF55);
             y += 12;
@@ -1465,13 +1406,32 @@ public class AutoMine {
         }
     }
 
+    private void aplicarTurbo() {
+        try {
+            PlayerControllerMP pc = mc.playerController;
+            if (pc == null) return;
+            // tira o atraso de 5 ticks entre um bloco e outro
+            ReflectionHelper.setPrivateValue(PlayerControllerMP.class, pc, Integer.valueOf(0),
+                    "blockHitDelay", "field_78781_i");
+            // o servidor aceita a quebra com 70% de progresso: pula os 30% finais
+            Float prog = ReflectionHelper.getPrivateValue(PlayerControllerMP.class, pc,
+                    "curBlockDamageMP", "field_78770_f");
+            if (prog != null && prog.floatValue() >= 0.7f && prog.floatValue() < 1.0f) {
+                ReflectionHelper.setPrivateValue(PlayerControllerMP.class, pc, Float.valueOf(1.0f),
+                        "curBlockDamageMP", "field_78770_f");
+            }
+        } catch (RuntimeException e) {
+            turboFalhou = true;
+            msg("Turbo indisponivel nesta versao (" + e.getClass().getSimpleName() + "). Desativado.");
+        }
+    }
+
     private void status() {
-        String modo = modoManual ? (manualEscavar ? "manual (escavar area)" : "manual (minerios)")
-                : (modoEscavar ? "escavar area" : (modoTunel ? "tunel" : "andando"));
+        String modo = modoEscavar ? "escavar area" : (modoTunel ? "tunel" : "andando");
         lin("§6--- Status do AutoMine ---");
         lin("§fLigado: §e" + (ativo ? "sim" : "nao") + "§f | Modo: §e" + modo);
         lin("§fMinerando: §e" + filtroAtual + "§f | Blocos compactos: §e" + (incluirBlocos ? "sim" : "nao"));
-        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo)");
+        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo) | Turbo: §e" + (turboFalhou ? "indisponivel" : turbo ? "LIGADO" : "desligado"));
         lin("§fLimite: §e" + (limiteBlocos == 0 ? "sem limite" : limiteBlocos + " blocos")
                 + "§f | Quebrados agora: §e" + quebrados);
         lin("§fMulti: §e" + (multiLigado ? "LIGADO" : "desligado") + "§f | Quantidade: §e" + multi
@@ -1499,8 +1459,6 @@ public class AutoMine {
             lin(branco + "/automine incluirblocos on|off " + cinza + "- tambem quebra os blocos compactos (diamante, ferro...). Padrao: off");
             lin(branco + "/automine blocos " + cinza + "- so os blocos compactos");
             lin(branco + "/automine tunel [minerio] " + cinza + "- cava em linha reta");
-            lin(branco + "/automine manual [minerio] " + cinza + "- VOCE anda e olha, ele mira e quebra os minerios ao alcance");
-            lin(branco + "/automine manual escavar " + cinza + "- VOCE anda, ele quebra qualquer bloco da area ao alcance (precisa de area)");
             lin(branco + "/automine escavar " + cinza + "- quebra tudo dentro da area (veja: ajuda area)");
         } else if (t.equals("area")) {
             lin(ouro + "--- Area demarcada ---");
@@ -1514,6 +1472,7 @@ public class AutoMine {
         } else if (t.equals("ajustes")) {
             lin(ouro + "--- Ajustes ---");
             lin(branco + "/automine velocidade 1-6 " + cinza + "- 1 lento ... 6 maximo (padrao 6)");
+            lin(branco + "/automine turbo on|off " + cinza + "- quebra bem mais rapido (padrao on; pode causar kick)");
             lin(branco + "/automine limite N " + cinza + "- para depois de quebrar N blocos (0 = sem limite)");
             lin(branco + "/automine multi N " + cinza + "- quantos blocos de uma vez (1 a 500)");
             lin(branco + "/automine multi on|off " + cinza + "- LIGA ou DESLIGA o multi. Comeca desligado");
@@ -1894,6 +1853,13 @@ public class AutoMine {
             String a = args[0].toLowerCase();
             if (a.equals("parar") || a.equals("off")) {
                 desligar("AutoMine DESLIGADO");
+            } else if (a.equals("turbo")) {
+                if (args.length > 1 && args[1].equalsIgnoreCase("off")) turbo = false;
+                else {
+                    turbo = true;
+                    turboFalhou = false;
+                }
+                msg("Turbo: " + (turbo ? "LIGADO" : "desligado"));
             } else if (a.equals("macro")) {
                 String o = args.length > 1 ? args[1].toLowerCase() : "";
                 if (o.equals("gravar")) {
@@ -1982,34 +1948,6 @@ public class AutoMine {
                     msg("Area: " + descricaoArea());
                     msg("Uso: /automine area on | off | limpar");
                 }
-            } else if (a.equals("manual")) {
-                // /automine manual            -> voce anda, ele quebra os minerios ao alcance (filtro atual)
-                // /automine manual diamante   -> idem, so esse minerio
-                // /automine manual escavar    -> voce anda, ele quebra QUALQUER bloco da area ao alcance
-                String o = args.length > 1 ? args[1].toLowerCase() : "";
-                boolean ok = true;
-                if (o.equals("escavar")) {
-                    if (pos1 == null || pos2 == null) {
-                        msg("Defina a area antes: /automine pos1 e /automine pos2.");
-                        ok = false;
-                    } else {
-                        atualizarArea();
-                        usarArea = true;
-                        manualEscavar = true;
-                    }
-                } else {
-                    manualEscavar = false;
-                    if (o.length() > 0 && !definirFiltro(o)) {
-                        msg("Minerio desconhecido. Digite /automine ajuda minerar");
-                        ok = false;
-                    }
-                }
-                if (ok) {
-                    modoManual = true;
-                    modoTunel = false;
-                    modoEscavar = false;
-                    ligar();
-                }
             } else if (a.equals("escavar")) {
                 if (pos1 == null || pos2 == null) {
                     msg("Defina a area antes: /automine pos1 e /automine pos2.");
@@ -2018,7 +1956,6 @@ public class AutoMine {
                     usarArea = true;
                     modoEscavar = true;
                     modoTunel = false;
-                    modoManual = false;
                     ligar();
                 }
             } else if (a.equals("players")) {
@@ -2151,7 +2088,6 @@ public class AutoMine {
                 if (definirFiltro(f)) {
                     modoTunel = true;
                     modoEscavar = false;
-                    modoManual = false;
                     ligar();
                     msg("Minerando: " + f);
                 } else {
@@ -2160,7 +2096,6 @@ public class AutoMine {
             } else if (definirFiltro(a)) {
                 modoTunel = false;
                 modoEscavar = false;
-                modoManual = false;
                 ligar();
                 msg("Minerando: " + a);
             } else {
