@@ -1,5 +1,13 @@
 package com.exemplo.automine;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -61,6 +69,8 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *   /automine incluirblocos on|off  -> tambem quebra blocos compactos (padrao: off)
  *   /automine blocos | blocolapis   -> so blocos compactos
  *   /automine tunel [minerio]       -> cava em linha reta
+ *   /automine manual [minerio]      -> VOCE anda e olha; ele so mira e quebra os minerios ao alcance
+ *   /automine manual escavar        -> VOCE anda; ele quebra qualquer bloco da area ao alcance
  *
  * AREA DEMARCADA
  *   /automine pos1 | pos2           -> marca os cantos (a area liga sozinha; a altura Y conta)
@@ -74,6 +84,10 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *   /automine multi N               -> quantos blocos de uma vez (1 a 500)
  *   /automine multi on|off          -> LIGA/DESLIGA o multi (tecla N ou botao). Comeca desligado.
  *   /automine trecho S | raio N     -> segundos por direcao | distancia maxima do ponto inicial
+ *
+ * MACRO (grava o que voce faz e repete em loop)
+ *   /automine macro gravar | parar | tocar [voltas] | salvar <nome> | carregar <nome> | lista
+ *   Teclas: G = gravar/parar gravacao, H = tocar/parar. Botoes no menu Esc.
  *
  * EXTRAS
  *   Ver players: tecla P, botao no Esc, /automine players on|off|lista|linhas|alcance N
@@ -108,6 +122,9 @@ public class AutoMine {
     private final Set<Block> minerios = new HashSet<Block>();
     private boolean incluirBlocos = false; // minera os blocos compactos? (padrao: nao)
     private String filtroAtual = "tudo";
+    private boolean modoManual = false;    // VOCE anda e olha; o mod so mira e quebra o que esta ao alcance
+    private boolean manualEscavar = false; // no manual: quebra qualquer bloco da area (em vez de so minerios)
+    private boolean manualAtacando = false;
     private boolean modoEscavar = false;   // quebra TODOS os blocos da area demarcada
     private BlockPos ultimoAlvoEscavar = null;
     private int camadaEscavar = Integer.MIN_VALUE; // altura (Y) da camada que esta sendo limpa
@@ -147,6 +164,8 @@ public class AutoMine {
     private static final int BTN_TOGGLE = 9003;
     private static final int BTN_PLAYERS = 9004;
     private static final int BTN_MULTI = 9005;
+    private static final int BTN_GRAVAR = 9006;
+    private static final int BTN_TOCAR = 9007;
 
     // ver players por perto: lista na tela + linhas ate cada um (aparecem atraves das paredes)
     private boolean listaPlayers = false;
@@ -154,6 +173,8 @@ public class AutoMine {
     private int alcancePlayers = 64;
     private KeyBinding teclaPlayers;
     private KeyBinding teclaMulti;
+    private KeyBinding teclaGravar;
+    private KeyBinding teclaTocar;
     private KeyBinding teclaVender;
     private boolean venderEnviar = true; // true = envia /vender direto; false = so abre o chat com o texto
     private KeyBinding teclaDropar;
@@ -249,6 +270,10 @@ public class AutoMine {
         ClientRegistry.registerKeyBinding(teclaPlayers);
         teclaMulti = new KeyBinding("Ligar/desligar multi-quebra", Keyboard.KEY_N, "AutoMine");
         ClientRegistry.registerKeyBinding(teclaMulti);
+        teclaGravar = new KeyBinding("Macro: gravar / parar gravacao", Keyboard.KEY_G, "AutoMine");
+        ClientRegistry.registerKeyBinding(teclaGravar);
+        teclaTocar = new KeyBinding("Macro: tocar / parar", Keyboard.KEY_H, "AutoMine");
+        ClientRegistry.registerKeyBinding(teclaTocar);
         ClientCommandHandler.instance.registerCommand(new CommandAutoMine());
         MinecraftForge.EVENT_BUS.register(this);
         definirFiltro("tudo");
@@ -305,6 +330,8 @@ public class AutoMine {
     private void ligar() {
         EntityPlayerSP p = mc.thePlayer;
         if (p == null) return;
+        if (gravando) pararGravacao();
+        if (reproduzindo) pararMacro("Macro parada porque o mod foi ligado.");
         direcao = p.getHorizontalFacing();
         yawAlvo = p.rotationYaw;
         sortearTrecho();
@@ -325,7 +352,8 @@ public class AutoMine {
         quebrados = 0;
         alvoContagem = null;
         camadaEscavar = Integer.MIN_VALUE;
-        msg("AutoMine LIGADO (" + (modoEscavar ? "escavando a area"
+        manualAtacando = false;
+        msg("AutoMine LIGADO (" + (modoManual ? "manual: voce anda, ele quebra" : modoEscavar ? "escavando a area"
                 : (modoTunel ? "tunel, direcao " + direcao.getName() : "andando")) + ")");
         if (usarArea) {
             msg("Area: " + descricaoArea());
@@ -372,6 +400,8 @@ public class AutoMine {
 
         if (mc.thePlayer == null || mc.theWorld == null) {
             ativo = false;
+            gravando = false;
+            reproduzindo = false;
             pendentes.clear();
             tentativas.clear();
             return;
@@ -380,6 +410,14 @@ public class AutoMine {
         if (teclaDropar.isPressed()) droparInventario(true);
         if (teclaVender.isPressed()) vender();
         if (teclaMulti.isPressed()) alternarMulti(!multiLigado);
+        if (teclaGravar.isPressed()) {
+            if (gravando) pararGravacao();
+            else iniciarGravacao();
+        }
+        if (teclaTocar.isPressed()) {
+            if (reproduzindo) pararMacro("Macro parada.");
+            else iniciarMacro(0);
+        }
         if (teclaPlayers.isPressed()) {
             alternarPlayers();
             msg("Ver players: " + (listaPlayers ? "LIGADO" : "desligado"));
@@ -390,6 +428,13 @@ public class AutoMine {
             if (ativo) desligar("AutoMine DESLIGADO");
             else ligar();
         }
+        // macro: grava cada tick do que voce faz / repete o que foi gravado
+        if (gravando) gravarFrame(mc.thePlayer);
+        if (reproduzindo) {
+            reproduzirFrame(mc.thePlayer);
+            return;
+        }
+
         if (!ativo) {
             // mod desligado: o multi ajuda enquanto VOCE quebra os blocos
             if (multiAtivo() && mc.currentScreen == null) {
@@ -424,7 +469,8 @@ public class AutoMine {
             return;
         }
 
-        if (modoEscavar) tickEscavar(p);
+        if (modoManual) tickManual(p);
+        else if (modoEscavar) tickEscavar(p);
         else if (modoTunel) tickTunel(p);
         else tickAndar(p);
     }
@@ -602,6 +648,62 @@ public class AutoMine {
         return (float) (Math.atan2(dz, dx) * 180.0 / Math.PI) - 90.0f;
     }
 
+    // ------------------------------------------------------ modo manual
+    // Voce anda e olha; o mod so mira e quebra o que estiver ao alcance. Nao mexe nas teclas de
+    // andar/pular. A camera so vira quando ha um bloco pra quebrar.
+
+    private void tickManual(EntityPlayerSP p) {
+        if (p.isInLava()) {
+            desligar("Lava! Parei.");
+            return;
+        }
+        if (manualEscavar && !usarArea) {
+            desligar("Defina a area antes com /automine pos1 e /automine pos2.");
+            return;
+        }
+
+        // acabou de quebrar o alvo: pausa curta conforme a velocidade
+        if (ultimoAlvoEscavar != null && mc.theWorld.isAirBlock(ultimoAlvoEscavar)) {
+            pausaTicks = PAUSA_BLOCO[nivelVel - 1];
+            ultimoAlvoEscavar = null;
+        }
+        if (pausaTicks > 0) pausaTicks--;
+
+        BlockPos alvo = null;
+        if (pausaTicks == 0) {
+            if (manualEscavar) {
+                camadaEscavar = Integer.MIN_VALUE; // sem camada: o que estiver ao alcance, de cima pra baixo
+                alvo = acharBlocoEscavar(p);
+            } else {
+                alvo = acharMinerio(p, RAIO_BUSCA, ALCANCE);
+            }
+        }
+
+        if (alvo == null) {
+            // sem alvo: solta o "bater" so se foi o mod que apertou (nao atrapalha o seu toque)
+            if (manualAtacando) {
+                atacar(false);
+                manualAtacando = false;
+            }
+            return;
+        }
+
+        boolean alinhado = mirarSuave(p, alvo);
+        escolherFerramenta(p, alvo);
+        boolean bater = alinhado;
+        if (!alinhado) {
+            esperaMira = ESPERA_MIRA[nivelVel - 1];
+        } else if (esperaMira > 0) {
+            esperaMira--;
+            bater = false;
+        }
+        atacar(bater);
+        manualAtacando = true;
+        ultimoAlvoEscavar = alvo;
+        alvoContagem = alvo;
+        if (alinhado && !manualEscavar) multiQuebra(p, alvo, false);
+    }
+
     // ----------------------------------------------- modo escavar a area
 
     // bloco que pode ser quebrado no modo escavar: qualquer um, menos ar, liquido, inquebravel
@@ -648,7 +750,8 @@ public class AutoMine {
                     if (score <= melhorScore) continue;
                     if (!dentroArea(pos)) continue;
                     if (!escavavel(pos)) continue;
-                    if (pos.equals(pe.down()) && !chaoSeguro(pe)) continue;
+                    // no manual nunca quebra o chao onde voce esta (quem decide e voce)
+                    if (pos.equals(pe.down()) && (modoManual || !chaoSeguro(pe))) continue;
 
                     MovingObjectPosition r = mc.theWorld.rayTraceBlocks(olhos, centro);
                     if (r != null && r.getBlockPos() != null && r.getBlockPos().equals(pos)) {
@@ -713,6 +816,17 @@ public class AutoMine {
 
         pular(puloAuto);
 
+        // define a camada de trabalho: a mais alta (ao seu alcance) que ainda tem bloco
+        if (camadaEscavar == Integer.MIN_VALUE) {
+            alvoLonge = acharProximoEscavar(p);
+            if (alvoLonge == null) {
+                terminouEscavar();
+                return;
+            }
+            camadaEscavar = alvoLonge.getY();
+            msg("Camada de trabalho: Y " + camadaEscavar);
+        }
+
         // acabou de quebrar o alvo: pequena pausa conforme a velocidade
         if (ultimoAlvoEscavar != null && mc.theWorld.isAirBlock(ultimoAlvoEscavar)) {
             pausaTicks = PAUSA_BLOCO[nivelVel - 1];
@@ -725,7 +839,7 @@ public class AutoMine {
             return;
         }
 
-        // 1) bloco ao alcance: quebra
+        // 1) bloco DA CAMADA ATUAL ao alcance: quebra
         BlockPos alvo = acharBlocoEscavar(p);
         if (alvo != null) {
             andar(false);
@@ -749,26 +863,20 @@ public class AutoMine {
         }
         atacar(false);
 
-        // 2) nada ao alcance: acha o proximo que falta e anda ate la
+        // 2) nada da camada ao alcance: acha o proximo que falta. Enquanto a camada tiver bloco
+        //    longe, anda ate ele (varrendo a camada); so desce quando a camada acabar.
         ticksVarredura++;
         if (alvoLonge == null || ticksVarredura >= 20 || mc.theWorld.isAirBlock(alvoLonge)) {
             ticksVarredura = 0;
             alvoLonge = acharProximoEscavar(p);
             if (alvoLonge == null) {
-                modoEscavar = false; // volta ao modo normal pra proxima vez que ligar
-                desligar("Area limpa, terminei. (Blocos encostados em agua/lava e inquebraveis foram pulados.)");
+                terminouEscavar();
                 return;
             }
-        }
-
-        double mov = Math.hypot(p.posX - ultX, p.posZ - ultZ);
-        ultX = p.posX;
-        ultZ = p.posZ;
-        if (mov < 0.01) ticksParado++;
-        else ticksParado = 0;
-        if (ticksParado > 100) {
-            desligar("Nao consigo alcancar o resto da area. Va pro ponto mais alto da area e ligue de novo.");
-            return;
+            if (alvoLonge.getY() != camadaEscavar) {
+                camadaEscavar = alvoLonge.getY();
+                msg("Camada limpa. Descendo pra Y " + camadaEscavar);
+            }
         }
 
         double dh = Math.hypot(alvoLonge.getX() + 0.5 - p.posX, alvoLonge.getZ() + 0.5 - p.posZ);
@@ -786,11 +894,48 @@ public class AutoMine {
                 && passavel(frente.up(2)) && passavel(pe.up(2));
         boolean dentro = dentroXZ(frente.getX() + 0.5, frente.getZ() + 0.5);
 
+        // caminho fechado por um bloco da area (de outra camada): quebra ele pra passar
+        if (!livre && !degrau && seguro && dentro && dh > 1.2) {
+            BlockPos bloqueio = null;
+            if (!passavel(frente.up()) && dentroArea(frente.up()) && escavavel(frente.up())) {
+                bloqueio = frente.up();
+            } else if (!passavel(frente) && dentroArea(frente) && escavavel(frente)) {
+                bloqueio = frente;
+            }
+            if (bloqueio != null) {
+                andar(false);
+                boolean alinhado = mirarSuave(p, bloqueio);
+                escolherFerramenta(p, bloqueio);
+                atacar(alinhado);
+                ultimoAlvoEscavar = bloqueio;
+                alvoContagem = bloqueio;
+                ticksParado = 0;
+                ultX = p.posX;
+                ultZ = p.posZ;
+                return;
+            }
+        }
+
+        double mov = Math.hypot(p.posX - ultX, p.posZ - ultZ);
+        ultX = p.posX;
+        ultZ = p.posZ;
+        if (mov < 0.01) ticksParado++;
+        else ticksParado = 0;
+        if (ticksParado > 100) {
+            desligar("Nao consigo alcancar o resto da area. Va pro ponto mais alto da area e ligue de novo.");
+            return;
+        }
+
         float dif = MathHelper.wrapAngleTo180_float(yawAlvo - p.rotationYaw);
         suavizar(p);
         // perto demais na horizontal (alvo logo acima/abaixo): nao fica andando a toa
         andar(dh > 1.2 && (livre || degrau) && dentro && Math.abs(dif) < 60.0f);
         pular(degrau || puloAuto);
+    }
+
+    private void terminouEscavar() {
+        modoEscavar = false; // volta ao modo normal pra proxima vez que ligar
+        desligar("Area limpa, terminei. (Blocos encostados em agua/lava e inquebraveis foram pulados.)");
     }
 
     // ------------------------------------------------------- modo tunel
@@ -906,6 +1051,8 @@ public class AutoMine {
             ev.buttonList.add(new GuiButton(BTN_TOGGLE, 4, 4, 130, 20, textoToggle()));
             ev.buttonList.add(new GuiButton(BTN_PLAYERS, 4, 28, 130, 20, textoPlayers()));
             ev.buttonList.add(new GuiButton(BTN_MULTI, 4, 52, 130, 20, textoMulti()));
+            ev.buttonList.add(new GuiButton(BTN_GRAVAR, 4, 76, 130, 20, textoGravar()));
+            ev.buttonList.add(new GuiButton(BTN_TOCAR, 4, 100, 130, 20, textoTocar()));
             return;
         }
         if (ev.gui instanceof GuiInventory) {
@@ -918,6 +1065,19 @@ public class AutoMine {
 
     @SubscribeEvent
     public void aoClicarBotao(GuiScreenEvent.ActionPerformedEvent.Post ev) {
+        if (ev.button.id == BTN_GRAVAR && ev.gui instanceof GuiIngameMenu) {
+            // comeca/para a gravacao e volta pro jogo (a gravacao nao pega o tempo do menu aberto)
+            if (gravando) pararGravacao();
+            else iniciarGravacao();
+            mc.displayGuiScreen(null);
+            return;
+        }
+        if (ev.button.id == BTN_TOCAR && ev.gui instanceof GuiIngameMenu) {
+            if (reproduzindo) pararMacro("Macro parada.");
+            else iniciarMacro(0);
+            mc.displayGuiScreen(null);
+            return;
+        }
         if (ev.button.id == BTN_MULTI && (ev.gui instanceof GuiIngameMenu || ev.gui instanceof GuiInventory)) {
             // liga/desliga o multi e deixa a tela aberta, so troca o texto do botao
             alternarMulti(!multiLigado);
@@ -961,11 +1121,301 @@ public class AutoMine {
         if (ativo) {
             String t = "AutoMine: LIGADO" + (usarArea ? " | area" : "") + (multiAtivo() ? " | multi " + multi : "")
                     + (limiteBlocos > 0 ? " | " + quebrados + "/" + limiteBlocos : "")
+                    + (modoManual ? " | manual" : "")
                     + (modoEscavar ? " | escavando" : "");
             mc.fontRendererObj.drawStringWithShadow(t, 4.0f, (float) y, 0x55FF55);
             y += 12;
         }
+        if (gravando) {
+            mc.fontRendererObj.drawStringWithShadow("MACRO: GRAVANDO " + (macro.size() / 20) + "s", 4.0f, (float) y, 0xFF5555);
+            y += 12;
+        } else if (reproduzindo) {
+            mc.fontRendererObj.drawStringWithShadow("MACRO: TOCANDO (volta " + (macroVoltas + 1) + ")", 4.0f, (float) y, 0x55FF55);
+            y += 12;
+        }
         desenharLista(y);
+    }
+
+    // ------------------------------------------------------------ macro
+    // Grava, tick a tick, o que voce faz (olhar, andar, pular, agachar, correr, bater, usar e o
+    // slot da hotbar) e repete em loop. Repete os MOVIMENTOS, entao funciona melhor se voce comecar
+    // do mesmo lugar e na mesma direcao em que gravou.
+
+    private static final int MACRO_MAX = 36000; // 30 minutos (20 ticks por segundo)
+    private static final int T_FRENTE = 1;
+    private static final int T_TRAS = 2;
+    private static final int T_ESQ = 4;
+    private static final int T_DIR = 8;
+    private static final int T_PULO = 16;
+    private static final int T_AGACHA = 32;
+    private static final int T_CORRE = 64;
+    private static final int T_BATE = 128;
+    private static final int T_USA = 256;
+
+    private static class Frame {
+        final float yaw;
+        final float pitch;
+        final int teclas;
+        final int slot;
+
+        Frame(float yaw, float pitch, int teclas, int slot) {
+            this.yaw = yaw;
+            this.pitch = pitch;
+            this.teclas = teclas;
+            this.slot = slot;
+        }
+    }
+
+    private final List<Frame> macro = new ArrayList<Frame>();
+    private boolean gravando = false;
+    private boolean reproduzindo = false;
+    private int macroIdx = 0;
+    private int macroVoltas = 0;
+    private int macroVezes = 0; // 0 = repete sem parar
+    private int macroTeclasAnt = 0;
+    private BlockPos macroInicio = null;
+
+    private int lerTeclas() {
+        int t = 0;
+        if (mc.gameSettings.keyBindForward.isKeyDown()) t |= T_FRENTE;
+        if (mc.gameSettings.keyBindBack.isKeyDown()) t |= T_TRAS;
+        if (mc.gameSettings.keyBindLeft.isKeyDown()) t |= T_ESQ;
+        if (mc.gameSettings.keyBindRight.isKeyDown()) t |= T_DIR;
+        if (mc.gameSettings.keyBindJump.isKeyDown()) t |= T_PULO;
+        if (mc.gameSettings.keyBindSneak.isKeyDown()) t |= T_AGACHA;
+        if (mc.gameSettings.keyBindSprint.isKeyDown()) t |= T_CORRE;
+        if (mc.gameSettings.keyBindAttack.isKeyDown()) t |= T_BATE;
+        if (mc.gameSettings.keyBindUseItem.isKeyDown()) t |= T_USA;
+        return t;
+    }
+
+    private void setTecla(KeyBinding k, boolean on) {
+        KeyBinding.setKeyBindState(k.getKeyCode(), on);
+    }
+
+    private void aplicarTeclas(int t) {
+        setTecla(mc.gameSettings.keyBindForward, (t & T_FRENTE) != 0);
+        setTecla(mc.gameSettings.keyBindBack, (t & T_TRAS) != 0);
+        setTecla(mc.gameSettings.keyBindLeft, (t & T_ESQ) != 0);
+        setTecla(mc.gameSettings.keyBindRight, (t & T_DIR) != 0);
+        setTecla(mc.gameSettings.keyBindJump, (t & T_PULO) != 0);
+        setTecla(mc.gameSettings.keyBindSneak, (t & T_AGACHA) != 0);
+        setTecla(mc.gameSettings.keyBindSprint, (t & T_CORRE) != 0);
+        setTecla(mc.gameSettings.keyBindAttack, (t & T_BATE) != 0);
+        setTecla(mc.gameSettings.keyBindUseItem, (t & T_USA) != 0);
+        // o "clique" de verdade (bater em mob, colocar bloco) so conta na hora que aperta
+        if ((t & T_BATE) != 0 && (macroTeclasAnt & T_BATE) == 0) {
+            KeyBinding.onTick(mc.gameSettings.keyBindAttack.getKeyCode());
+        }
+        if ((t & T_USA) != 0 && (macroTeclasAnt & T_USA) == 0) {
+            KeyBinding.onTick(mc.gameSettings.keyBindUseItem.getKeyCode());
+        }
+        macroTeclasAnt = t;
+    }
+
+    private void soltarMacroTeclas() {
+        setTecla(mc.gameSettings.keyBindForward, false);
+        setTecla(mc.gameSettings.keyBindBack, false);
+        setTecla(mc.gameSettings.keyBindLeft, false);
+        setTecla(mc.gameSettings.keyBindRight, false);
+        setTecla(mc.gameSettings.keyBindJump, false);
+        setTecla(mc.gameSettings.keyBindSneak, false);
+        setTecla(mc.gameSettings.keyBindSprint, false);
+        setTecla(mc.gameSettings.keyBindAttack, false);
+        setTecla(mc.gameSettings.keyBindUseItem, false);
+        macroTeclasAnt = 0;
+    }
+
+    private void iniciarGravacao() {
+        EntityPlayerSP p = mc.thePlayer;
+        if (p == null) return;
+        if (ativo) desligar("AutoMine DESLIGADO pra gravar a macro.");
+        if (reproduzindo) pararMacro("Macro parada.");
+        macro.clear();
+        macroInicio = new BlockPos(p.posX, p.posY, p.posZ);
+        gravando = true;
+        msg("GRAVANDO! Faca o que quiser (andar, minerar, pular...). Pra parar: /automine macro parar, tecla G ou botao no menu Esc.");
+    }
+
+    private void pararGravacao() {
+        gravando = false;
+        msg("Gravacao parada: " + macro.size() + " ticks (" + (macro.size() / 20) + "s). Pra repetir: /automine macro tocar, tecla H ou botao no menu Esc.");
+    }
+
+    private void gravarFrame(EntityPlayerSP p) {
+        if (mc.currentScreen != null) return; // menu aberto nao entra na gravacao
+        if (macro.size() >= MACRO_MAX) {
+            gravando = false;
+            msg("Limite da gravacao (30 min) atingido. Gravacao parada.");
+            return;
+        }
+        macro.add(new Frame(p.rotationYaw, p.rotationPitch, lerTeclas(), p.inventory.currentItem));
+    }
+
+    private void iniciarMacro(int vezes) {
+        EntityPlayerSP p = mc.thePlayer;
+        if (p == null) return;
+        if (gravando) pararGravacao();
+        if (macro.isEmpty()) {
+            msg("Nao tem macro gravada. Use /automine macro gravar (ou carregar <nome>).");
+            return;
+        }
+        if (ativo) desligar("AutoMine DESLIGADO pra tocar a macro.");
+        macroIdx = 0;
+        macroVoltas = 0;
+        macroVezes = vezes;
+        macroTeclasAnt = 0;
+        reproduzindo = true;
+        msg("Tocando a macro (" + (macro.size() / 20) + "s por volta, "
+                + (vezes > 0 ? vezes + " voltas" : "sem parar") + "). Pra parar: tecla H, /automine macro parar ou botao no menu Esc.");
+        if (macroInicio != null) {
+            double d = Math.sqrt(macroInicio.distanceSq(new BlockPos(p.posX, p.posY, p.posZ)));
+            if (d > 2.0) {
+                msg("Atencao: voce esta a " + (int) d + " blocos de onde comecou a gravar ("
+                        + macroInicio.getX() + " " + macroInicio.getY() + " " + macroInicio.getZ()
+                        + "). A macro repete os movimentos, entao pode sair diferente.");
+            }
+        }
+    }
+
+    private void pararMacro(String motivo) {
+        reproduzindo = false;
+        soltarMacroTeclas();
+        msg(motivo);
+    }
+
+    private void reproduzirFrame(EntityPlayerSP p) {
+        if (mc.currentScreen != null) {
+            // menu aberto: pausa a macro (solta as teclas e espera)
+            soltarMacroTeclas();
+            return;
+        }
+        if (p.getHealth() < VIDA_MINIMA) {
+            pararMacro("Vida baixa, parei a macro.");
+            return;
+        }
+        if (p.isInLava()) {
+            pararMacro("Lava! Parei a macro.");
+            return;
+        }
+        if (macro.isEmpty()) {
+            pararMacro("A macro esta vazia.");
+            return;
+        }
+
+        Frame f = macro.get(macroIdx);
+        p.rotationYaw = f.yaw;
+        p.rotationPitch = f.pitch;
+        if (f.slot >= 0 && f.slot < 9) p.inventory.currentItem = f.slot;
+        aplicarTeclas(f.teclas);
+
+        macroIdx++;
+        if (macroIdx >= macro.size()) {
+            macroIdx = 0;
+            macroVoltas++;
+            if (macroVezes > 0 && macroVoltas >= macroVezes) {
+                pararMacro("Macro terminou (" + macroVoltas + " voltas).");
+            }
+        }
+    }
+
+    private String textoGravar() {
+        return gravando ? "Parar gravacao" : "Gravar macro";
+    }
+
+    private String textoTocar() {
+        if (reproduzindo) return "Parar macro";
+        return macro.isEmpty() ? "Tocar macro" : "Tocar macro (" + (macro.size() / 20) + "s)";
+    }
+
+    private File pastaMacros() {
+        return new File(mc.mcDataDir, "automine-macros");
+    }
+
+    private String nomeSeguro(String n) {
+        return n == null ? "" : n.replaceAll("[^A-Za-z0-9_-]", "");
+    }
+
+    private void salvarMacro(String nomeBruto) {
+        String nome = nomeSeguro(nomeBruto);
+        if (nome.length() == 0) {
+            msg("Uso: /automine macro salvar <nome>  (letras, numeros, _ e -)");
+            return;
+        }
+        if (macro.isEmpty()) {
+            msg("Nao tem macro gravada pra salvar.");
+            return;
+        }
+        PrintWriter w = null;
+        try {
+            File dir = pastaMacros();
+            dir.mkdirs();
+            w = new PrintWriter(new OutputStreamWriter(new FileOutputStream(new File(dir, nome + ".txt")), "UTF-8"));
+            for (Frame f : macro) {
+                w.println(f.yaw + " " + f.pitch + " " + f.teclas + " " + f.slot);
+            }
+            msg("Macro salva como \"" + nome + "\" (" + (macro.size() / 20) + "s).");
+        } catch (IOException e) {
+            msg("Erro ao salvar: " + e.getMessage());
+        } finally {
+            if (w != null) w.close();
+        }
+    }
+
+    private void carregarMacro(String nomeBruto) {
+        String nome = nomeSeguro(nomeBruto);
+        if (nome.length() == 0) {
+            msg("Uso: /automine macro carregar <nome>  (veja os nomes com /automine macro lista)");
+            return;
+        }
+        File arq = new File(pastaMacros(), nome + ".txt");
+        if (!arq.exists()) {
+            msg("Nao achei a macro \"" + nome + "\". Veja /automine macro lista");
+            return;
+        }
+        BufferedReader r = null;
+        try {
+            r = new BufferedReader(new InputStreamReader(new FileInputStream(arq), "UTF-8"));
+            List<Frame> lidos = new ArrayList<Frame>();
+            String linha;
+            while ((linha = r.readLine()) != null && lidos.size() < MACRO_MAX) {
+                String[] x = linha.trim().split(" ");
+                if (x.length < 4) continue;
+                lidos.add(new Frame(Float.parseFloat(x[0]), Float.parseFloat(x[1]),
+                        Integer.parseInt(x[2]), Integer.parseInt(x[3])));
+            }
+            if (reproduzindo) pararMacro("Macro parada.");
+            gravando = false;
+            macro.clear();
+            macro.addAll(lidos);
+            macroInicio = null;
+            msg("Macro \"" + nome + "\" carregada (" + (macro.size() / 20) + "s). Toque com /automine macro tocar.");
+        } catch (IOException e) {
+            msg("Erro ao carregar: " + e.getMessage());
+        } catch (NumberFormatException e) {
+            msg("Arquivo da macro estragado: " + e.getMessage());
+        } finally {
+            if (r != null) {
+                try {
+                    r.close();
+                } catch (IOException ignorado) {
+                    // nada a fazer
+                }
+            }
+        }
+    }
+
+    private void listarMacros() {
+        String[] nomes = pastaMacros().list();
+        if (nomes == null || nomes.length == 0) {
+            msg("Nenhuma macro salva ainda. Grave uma e use /automine macro salvar <nome>");
+            return;
+        }
+        StringBuilder sb = new StringBuilder("Macros salvas:");
+        for (String n : nomes) {
+            if (n.endsWith(".txt")) sb.append(' ').append(n.substring(0, n.length() - 4));
+        }
+        msg(sb.toString());
     }
 
     // ---------------------------------------------- multi, limite e ajuda
@@ -1016,7 +1466,8 @@ public class AutoMine {
     }
 
     private void status() {
-        String modo = modoEscavar ? "escavar area" : (modoTunel ? "tunel" : "andando");
+        String modo = modoManual ? (manualEscavar ? "manual (escavar area)" : "manual (minerios)")
+                : (modoEscavar ? "escavar area" : (modoTunel ? "tunel" : "andando"));
         lin("§6--- Status do AutoMine ---");
         lin("§fLigado: §e" + (ativo ? "sim" : "nao") + "§f | Modo: §e" + modo);
         lin("§fMinerando: §e" + filtroAtual + "§f | Blocos compactos: §e" + (incluirBlocos ? "sim" : "nao"));
@@ -1026,6 +1477,8 @@ public class AutoMine {
         lin("§fMulti: §e" + (multiLigado ? "LIGADO" : "desligado") + "§f | Quantidade: §e" + multi
                 + "§f | Extras: §e" + (multiSoIgual ? "mesmo tipo" : "qualquer bloco"));
         lin("§fArea: §e" + descricaoArea());
+        lin("§fMacro: §e" + (gravando ? "gravando" : (reproduzindo ? "tocando" : "parada"))
+                + "§f | gravada: §e" + (macro.size() / 20) + "s");
         lin("§7Ajuda completa: /automine ajuda");
     }
 
@@ -1046,6 +1499,8 @@ public class AutoMine {
             lin(branco + "/automine incluirblocos on|off " + cinza + "- tambem quebra os blocos compactos (diamante, ferro...). Padrao: off");
             lin(branco + "/automine blocos " + cinza + "- so os blocos compactos");
             lin(branco + "/automine tunel [minerio] " + cinza + "- cava em linha reta");
+            lin(branco + "/automine manual [minerio] " + cinza + "- VOCE anda e olha, ele mira e quebra os minerios ao alcance");
+            lin(branco + "/automine manual escavar " + cinza + "- VOCE anda, ele quebra qualquer bloco da area ao alcance (precisa de area)");
             lin(branco + "/automine escavar " + cinza + "- quebra tudo dentro da area (veja: ajuda area)");
         } else if (t.equals("area")) {
             lin(ouro + "--- Area demarcada ---");
@@ -1074,6 +1529,16 @@ public class AutoMine {
             lin(amarelo + "Dropar: " + branco + "botao no inventario, tecla K ou /automine dropar [mochila]");
             lin(amarelo + "Vender: " + branco + "botao no inventario, tecla L ou /automine vender");
             lin(cinza + "/automine vendermodo enviar|abrir - envia /vender direto ou so abre o chat com ele digitado");
+        } else if (t.equals("macro")) {
+            lin(ouro + "--- Macro (grava o que voce faz e repete) ---");
+            lin(verde + "1. " + branco + "/automine macro gravar " + cinza + "- comeca a gravar (ou tecla G, ou botao no Esc)");
+            lin(verde + "2. " + cinza + "Ande, minere, pule... faca o que quiser repetir");
+            lin(verde + "3. " + branco + "/automine macro parar " + cinza + "- para a gravacao (ou tecla G de novo)");
+            lin(verde + "4. " + branco + "/automine macro tocar " + cinza + "- repete em loop (ou tecla H, ou botao no Esc)");
+            lin(branco + "/automine macro tocar 5 " + cinza + "- repete so 5 voltas");
+            lin(branco + "/automine macro salvar <nome> " + cinza + "- guarda; " + branco + "carregar <nome>" + cinza + " e " + branco + "lista");
+            lin(cinza + "Repete os MOVIMENTOS: comece do mesmo lugar e direcao em que gravou.");
+            lin(cinza + "Abrir um menu pausa a macro. Para sozinha com vida baixa ou lava.");
         } else if (t.equals("teclas")) {
             lin(ouro + "--- Teclas (mudam em Controles > AutoMine) ---");
             lin(branco + "M " + cinza + "- liga/desliga o mod");
@@ -1081,6 +1546,8 @@ public class AutoMine {
             lin(branco + "P " + cinza + "- ver players");
             lin(branco + "K " + cinza + "- dropar inventario");
             lin(branco + "L " + cinza + "- vender");
+            lin(branco + "G " + cinza + "- macro: gravar / parar gravacao");
+            lin(branco + "H " + cinza + "- macro: tocar / parar");
         } else {
             lin(ouro + "=== AutoMine - AJUDA ===");
             lin(cinza + "Escolha um assunto:");
@@ -1089,6 +1556,7 @@ public class AutoMine {
             lin(verde + "/automine ajuda area " + cinza + "- demarcar area e escavar");
             lin(verde + "/automine ajuda ajustes " + cinza + "- velocidade, limite, multi");
             lin(verde + "/automine ajuda extras " + cinza + "- players, dropar, vender");
+            lin(verde + "/automine ajuda macro " + cinza + "- gravar o que voce faz e repetir");
             lin(verde + "/automine ajuda teclas " + cinza + "- todas as teclas");
             lin(verde + "/automine status " + cinza + "- ajustes atuais");
         }
@@ -1426,6 +1894,35 @@ public class AutoMine {
             String a = args[0].toLowerCase();
             if (a.equals("parar") || a.equals("off")) {
                 desligar("AutoMine DESLIGADO");
+            } else if (a.equals("macro")) {
+                String o = args.length > 1 ? args[1].toLowerCase() : "";
+                if (o.equals("gravar")) {
+                    iniciarGravacao();
+                } else if (o.equals("parar")) {
+                    if (gravando) pararGravacao();
+                    else if (reproduzindo) pararMacro("Macro parada.");
+                    else msg("Nao tem macro gravando nem tocando.");
+                } else if (o.equals("tocar")) {
+                    int vezes = 0;
+                    if (args.length > 2) {
+                        try {
+                            vezes = Integer.parseInt(args[2]);
+                        } catch (NumberFormatException ex) {
+                            vezes = 0;
+                        }
+                    }
+                    iniciarMacro(Math.max(0, vezes));
+                } else if (o.equals("salvar")) {
+                    salvarMacro(args.length > 2 ? args[2] : "");
+                } else if (o.equals("carregar")) {
+                    carregarMacro(args.length > 2 ? args[2] : "");
+                } else if (o.equals("lista")) {
+                    listarMacros();
+                } else {
+                    msg("Macro: " + (gravando ? "GRAVANDO" : (reproduzindo ? "TOCANDO" : "parada"))
+                            + " | gravada: " + (macro.size() / 20) + "s");
+                    msg("Uso: /automine macro gravar | parar | tocar [voltas] | salvar <nome> | carregar <nome> | lista");
+                }
             } else if (a.equals("ajuda") || a.equals("help") || a.equals("?")) {
                 ajuda(args.length > 1 ? args[1].toLowerCase() : "");
             } else if (a.equals("status")) {
@@ -1485,6 +1982,34 @@ public class AutoMine {
                     msg("Area: " + descricaoArea());
                     msg("Uso: /automine area on | off | limpar");
                 }
+            } else if (a.equals("manual")) {
+                // /automine manual            -> voce anda, ele quebra os minerios ao alcance (filtro atual)
+                // /automine manual diamante   -> idem, so esse minerio
+                // /automine manual escavar    -> voce anda, ele quebra QUALQUER bloco da area ao alcance
+                String o = args.length > 1 ? args[1].toLowerCase() : "";
+                boolean ok = true;
+                if (o.equals("escavar")) {
+                    if (pos1 == null || pos2 == null) {
+                        msg("Defina a area antes: /automine pos1 e /automine pos2.");
+                        ok = false;
+                    } else {
+                        atualizarArea();
+                        usarArea = true;
+                        manualEscavar = true;
+                    }
+                } else {
+                    manualEscavar = false;
+                    if (o.length() > 0 && !definirFiltro(o)) {
+                        msg("Minerio desconhecido. Digite /automine ajuda minerar");
+                        ok = false;
+                    }
+                }
+                if (ok) {
+                    modoManual = true;
+                    modoTunel = false;
+                    modoEscavar = false;
+                    ligar();
+                }
             } else if (a.equals("escavar")) {
                 if (pos1 == null || pos2 == null) {
                     msg("Defina a area antes: /automine pos1 e /automine pos2.");
@@ -1493,6 +2018,7 @@ public class AutoMine {
                     usarArea = true;
                     modoEscavar = true;
                     modoTunel = false;
+                    modoManual = false;
                     ligar();
                 }
             } else if (a.equals("players")) {
@@ -1625,6 +2151,7 @@ public class AutoMine {
                 if (definirFiltro(f)) {
                     modoTunel = true;
                     modoEscavar = false;
+                    modoManual = false;
                     ligar();
                     msg("Minerando: " + f);
                 } else {
@@ -1633,6 +2160,7 @@ public class AutoMine {
             } else if (definirFiltro(a)) {
                 modoTunel = false;
                 modoEscavar = false;
+                modoManual = false;
                 ligar();
                 msg("Minerando: " + a);
             } else {
