@@ -65,7 +65,8 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  * AREA DEMARCADA
  *   /automine pos1 | pos2           -> marca os cantos (a area liga sozinha; a altura Y conta)
  *   /automine area on|off|limpar    -> liga, desliga ou apaga a area
- *   /automine escavar               -> quebra TODOS os blocos da area, de cima pra baixo
+ *   /automine escavar               -> limpa a area camada por camada: varre a de cima inteira
+ *                                      andando e so depois desce pra proxima
  *
  * AJUSTES
  *   /automine velocidade 1-6        -> 1 = lento ... 6 = maximo (padrao 6)
@@ -109,6 +110,7 @@ public class AutoMine {
     private String filtroAtual = "tudo";
     private boolean modoEscavar = false;   // quebra TODOS os blocos da area demarcada
     private BlockPos ultimoAlvoEscavar = null;
+    private int camadaEscavar = Integer.MIN_VALUE; // altura (Y) da camada que esta sendo limpa
 
     // estado do modo andando
     private float yawAlvo = 0.0f;
@@ -322,6 +324,7 @@ public class AutoMine {
         ultimoAlvoEscavar = null;
         quebrados = 0;
         alvoContagem = null;
+        camadaEscavar = Integer.MIN_VALUE;
         msg("AutoMine LIGADO (" + (modoEscavar ? "escavando a area"
                 : (modoTunel ? "tunel, direcao " + direcao.getName() : "andando")) + ")");
         if (usarArea) {
@@ -637,6 +640,9 @@ public class AutoMine {
                     Vec3 centro = new Vec3(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
                     double d = olhos.distanceTo(centro);
                     if (d > ALCANCE) continue;
+
+                    // so a camada de trabalho (a de cima limpa inteira antes de descer)
+                    if (camadaEscavar != Integer.MIN_VALUE && pos.getY() != camadaEscavar) continue;
 
                     double score = pos.getY() * 1000.0 - d;
                     if (score <= melhorScore) continue;
@@ -1047,7 +1053,7 @@ public class AutoMine {
             lin(verde + "2. " + branco + "/automine pos2 " + cinza + "- no canto oposto (a area liga sozinha)");
             lin(verde + "3. " + branco + "/automine " + cinza + "ou " + branco + "/automine escavar");
             lin(branco + "/automine area on|off|limpar " + cinza + "- liga, desliga ou apaga a area");
-            lin(branco + "/automine escavar " + cinza + "- quebra TODOS os blocos da area, de cima pra baixo");
+            lin(branco + "/automine escavar " + cinza + "- limpa a area CAMADA POR CAMADA: varre a de cima inteira andando e so depois desce");
             lin(cinza + "A altura (Y) conta. Pra escavar, fique dentro da area, no ponto mais alto.");
             lin(cinza + "Com a area ligada ele so mina e so anda dentro dela.");
         } else if (t.equals("ajustes")) {
