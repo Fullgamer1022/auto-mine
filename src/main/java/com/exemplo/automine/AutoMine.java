@@ -84,6 +84,7 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  * AJUSTES
  *   /automine velocidade 1-6        -> 1 = lento ... 6 = maximo (padrao 6)
  *   /automine limite N              -> para depois de quebrar N blocos (0 = sem limite)
+ *   /automine doidao on|off         -> quebra qualquer bloco ao alcance (padrao off)
  *   /automine camadas on|off        -> escavar camada por camada (padrao on)
  *   /automine turbo on|max|off      -> mineracao acelerada (padrao on)
  *   /automine multi N               -> quantos blocos de uma vez (1 a 500)
@@ -132,6 +133,7 @@ public class AutoMine {
     private boolean turboFalhou = false;
     private boolean turboMax = false;      // alem do atraso, pula os 30% finais (pode fazer o servidor devolver o bloco)
     private BlockPos ultimoAlvoEscavar = null;
+    private boolean doidao = false;      // quebra QUALQUER bloco ao alcance de um player normal
     private boolean camadas = true;     // escavar camada por camada (off = quebra o que estiver mais perto)
     private int camadaEscavar = Integer.MIN_VALUE; // altura (Y) da camada que esta sendo limpa
 
@@ -1440,7 +1442,7 @@ public class AutoMine {
         lin("§6--- Status do AutoMine ---");
         lin("§fLigado: §e" + (ativo ? "sim" : "nao") + "§f | Modo: §e" + modo);
         lin("§fMinerando: §e" + filtroAtual + "§f | Blocos compactos: §e" + (incluirBlocos ? "sim" : "nao"));
-        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo) | Camadas: §e" + (camadas ? "sim" : "nao") + "§f | Turbo: §e" + (turboFalhou ? "indisponivel" : turbo ? (turboMax ? "MAXIMO" : "LIGADO") : "desligado"));
+        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo) | Doidao: §e" + (doidao ? "sim" : "nao") + "§f | Camadas: §e" + (camadas ? "sim" : "nao") + "§f | Turbo: §e" + (turboFalhou ? "indisponivel" : turbo ? (turboMax ? "MAXIMO" : "LIGADO") : "desligado"));
         lin("§fLimite: §e" + (limiteBlocos == 0 ? "sem limite" : limiteBlocos + " blocos")
                 + "§f | Quebrados agora: §e" + quebrados);
         lin("§fMulti: §e" + (multiLigado ? "LIGADO" : "desligado") + "§f | Quantidade: §e" + multi
@@ -1482,6 +1484,7 @@ public class AutoMine {
         } else if (t.equals("ajustes")) {
             lin(ouro + "--- Ajustes ---");
             lin(branco + "/automine velocidade 1-6 " + cinza + "- 1 lento ... 6 maximo (padrao 6)");
+            lin(branco + "/automine doidao on|off " + cinza + "- quebra QUALQUER bloco ao alcance normal do player (padrao off)");
             lin(branco + "/automine camadas on|off " + cinza + "- escavar camada por camada (padrao on); off = quebra o mais perto");
             lin(branco + "/automine turbo on|off " + cinza + "- on = sem atraso entre blocos (padrao) | max = ainda mais rapido, mas pode travar num bloco");
             lin(branco + "/automine limite N " + cinza + "- para depois de quebrar N blocos (0 = sem limite)");
@@ -1836,12 +1839,23 @@ public class AutoMine {
         BlockPos melhor = null;
         double melhorDist = Double.MAX_VALUE;
 
+        // doidao: qualquer bloco no alcance normal de um player (4.5), so na busca de perto
+        boolean qualquer = doidao && alcance <= 5.0;
+        if (qualquer) {
+            raio = 5;
+            alcance = 4.5;
+        }
+        BlockPos pe = new BlockPos(p.posX, p.posY, p.posZ);
+
         for (int dx = -raio; dx <= raio; dx++) {
             for (int dy = -raio; dy <= raio; dy++) {
                 for (int dz = -raio; dz <= raio; dz++) {
                     BlockPos pos = base.add(dx, dy, dz);
                     Block b = mc.theWorld.getBlockState(pos).getBlock();
-                    if (!minerios.contains(b)) continue;
+                    if (qualquer) {
+                        if (!escavavel(pos)) continue;
+                        if (pos.equals(pe.down()) && !chaoSeguro(pe)) continue;
+                    } else if (!minerios.contains(b)) continue;
                     if (usarArea && !dentroArea(pos)) continue;
 
                     Vec3 centro = new Vec3(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
@@ -2004,6 +2018,10 @@ public class AutoMine {
                 } else {
                     msg("Agora va ate o outro canto e use /automine " + (a.equals("pos1") ? "pos2" : "pos1"));
                 }
+            } else if (a.equals("doidao")) {
+                if (args.length > 1) doidao = !args[1].equalsIgnoreCase("off");
+                else doidao = !doidao;
+                msg("Modo DOIDAO: " + (doidao ? "LIGADO (quebra qualquer bloco ao alcance)" : "desligado (so minerios)"));
             } else if (a.equals("camadas")) {
                 if (args.length > 1) camadas = !args[1].equalsIgnoreCase("off");
                 else camadas = !camadas;
