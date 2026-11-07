@@ -39,6 +39,8 @@ import net.minecraft.command.ICommandSender;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.Blocks;
+import net.minecraft.init.Items;
+import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.play.client.C07PacketPlayerDigging;
 import net.minecraft.util.BlockPos;
@@ -73,7 +75,8 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *   /automine tunel [minerio]       -> cava em linha reta
  *
  * AREA DEMARCADA
- *   /automine pos1 | pos2           -> marca os cantos (a area liga sozinha; a altura Y conta)
+ *   GRAVETO na mao + botao direito num bloco -> marca pos1, depois pos2 (caixa verde/vermelha/amarela)
+ *   /automine pos1 | pos2           -> marca os cantos onde voce esta (a area liga sozinha; a altura Y conta)
  *   /automine area on|off|limpar    -> liga, desliga ou apaga a area
  *   /automine escavar               -> limpa a area camada por camada: varre a de cima inteira
  *                                      andando e so depois desce pra proxima
@@ -81,6 +84,7 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  * AJUSTES
  *   /automine velocidade 1-6        -> 1 = lento ... 6 = maximo (padrao 6)
  *   /automine limite N              -> para depois de quebrar N blocos (0 = sem limite)
+ *   /automine camadas on|off        -> escavar camada por camada (padrao on)
  *   /automine turbo on|max|off      -> mineracao acelerada (padrao on)
  *   /automine multi N               -> quantos blocos de uma vez (1 a 500)
  *   /automine multi on|off          -> LIGA/DESLIGA o multi (tecla N ou botao). Comeca desligado.
@@ -128,6 +132,7 @@ public class AutoMine {
     private boolean turboFalhou = false;
     private boolean turboMax = false;      // alem do atraso, pula os 30% finais (pode fazer o servidor devolver o bloco)
     private BlockPos ultimoAlvoEscavar = null;
+    private boolean camadas = true;     // escavar camada por camada (off = quebra o que estiver mais perto)
     private int camadaEscavar = Integer.MIN_VALUE; // altura (Y) da camada que esta sendo limpa
 
     // estado do modo andando
@@ -687,8 +692,10 @@ public class AutoMine {
 
                     // so a camada de trabalho (a de cima limpa inteira antes de descer)
                     if (camadaEscavar != Integer.MIN_VALUE && pos.getY() != camadaEscavar) continue;
+                    // nunca sobe: ignora o que esta acima da altura da cabeca
+                    if (pos.getY() > pe.getY() + 1) continue;
 
-                    double score = pos.getY() * 1000.0 - d;
+                    double score = camadas ? pos.getY() * 1000.0 - d : -d;
                     if (score <= melhorScore) continue;
                     if (!dentroArea(pos)) continue;
                     if (!escavavel(pos)) continue;
@@ -722,13 +729,16 @@ public class AutoMine {
             z1 = Math.min(z1, pz + 20);
         }
 
+        // nunca sobe pra quebrar: so conta o que esta na altura da cabeca ou abaixo
+        y1 = Math.min(y1, (int) Math.floor(p.posY) + 1);
+
         BlockPos melhor = null;
         double melhorScore = -Double.MAX_VALUE;
         for (int x = x0; x <= x1; x++) {
             for (int z = z0; z <= z1; z++) {
                 double dh = Math.hypot(x + 0.5 - p.posX, z + 0.5 - p.posZ);
                 for (int y = y0; y <= y1; y++) {
-                    double score = y * 1000.0 - dh;
+                    double score = camadas ? y * 1000.0 - dh : -dh;
                     if (y > p.posY + 2) score -= 100000.0; // acima do alcance: por ultimo
                     if (score <= melhorScore) continue;
                     BlockPos pos = new BlockPos(x, y, z);
@@ -758,7 +768,7 @@ public class AutoMine {
         pular(puloAuto);
 
         // define a camada de trabalho: a mais alta (ao seu alcance) que ainda tem bloco
-        if (camadaEscavar == Integer.MIN_VALUE) {
+        if (camadas && camadaEscavar == Integer.MIN_VALUE) {
             alvoLonge = acharProximoEscavar(p);
             if (alvoLonge == null) {
                 terminouEscavar();
@@ -814,7 +824,7 @@ public class AutoMine {
                 terminouEscavar();
                 return;
             }
-            if (alvoLonge.getY() != camadaEscavar) {
+            if (camadas && alvoLonge.getY() != camadaEscavar) {
                 camadaEscavar = alvoLonge.getY();
                 msg("Camada limpa. Descendo pra Y " + camadaEscavar);
             }
@@ -1430,7 +1440,7 @@ public class AutoMine {
         lin("§6--- Status do AutoMine ---");
         lin("§fLigado: §e" + (ativo ? "sim" : "nao") + "§f | Modo: §e" + modo);
         lin("§fMinerando: §e" + filtroAtual + "§f | Blocos compactos: §e" + (incluirBlocos ? "sim" : "nao"));
-        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo) | Turbo: §e" + (turboFalhou ? "indisponivel" : turbo ? (turboMax ? "MAXIMO" : "LIGADO") : "desligado"));
+        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo) | Camadas: §e" + (camadas ? "sim" : "nao") + "§f | Turbo: §e" + (turboFalhou ? "indisponivel" : turbo ? (turboMax ? "MAXIMO" : "LIGADO") : "desligado"));
         lin("§fLimite: §e" + (limiteBlocos == 0 ? "sem limite" : limiteBlocos + " blocos")
                 + "§f | Quebrados agora: §e" + quebrados);
         lin("§fMulti: §e" + (multiLigado ? "LIGADO" : "desligado") + "§f | Quantidade: §e" + multi
@@ -1461,6 +1471,7 @@ public class AutoMine {
             lin(branco + "/automine escavar " + cinza + "- quebra tudo dentro da area (veja: ajuda area)");
         } else if (t.equals("area")) {
             lin(ouro + "--- Area demarcada ---");
+            lin(verde + "0. " + branco + "GRAVETO na mao + botao direito no bloco " + cinza + "- marca pos1 e pos2 (/automine varinha off desliga)");
             lin(verde + "1. " + branco + "/automine pos1 " + cinza + "- no primeiro canto");
             lin(verde + "2. " + branco + "/automine pos2 " + cinza + "- no canto oposto (a area liga sozinha)");
             lin(verde + "3. " + branco + "/automine " + cinza + "ou " + branco + "/automine escavar");
@@ -1471,6 +1482,7 @@ public class AutoMine {
         } else if (t.equals("ajustes")) {
             lin(ouro + "--- Ajustes ---");
             lin(branco + "/automine velocidade 1-6 " + cinza + "- 1 lento ... 6 maximo (padrao 6)");
+            lin(branco + "/automine camadas on|off " + cinza + "- escavar camada por camada (padrao on); off = quebra o mais perto");
             lin(branco + "/automine turbo on|off " + cinza + "- on = sem atraso entre blocos (padrao) | max = ainda mais rapido, mas pode travar num bloco");
             lin(branco + "/automine limite N " + cinza + "- para depois de quebrar N blocos (0 = sem limite)");
             lin(branco + "/automine multi N " + cinza + "- quantos blocos de uma vez (1 a 500)");
@@ -1564,10 +1576,57 @@ public class AutoMine {
         }
     }
 
+    // clique direito num bloco segurando um GRAVETO: marca pos1, depois pos2, depois pos1 de novo...
+    private boolean varinha = true;
+    private boolean proximoEhPos2 = false;
+
+    @SubscribeEvent
+    public void aoInteragir(PlayerInteractEvent ev) {
+        if (!varinha || ev.action != PlayerInteractEvent.Action.RIGHT_CLICK_BLOCK) return;
+        if (ev.world == null || !ev.world.isRemote) return;
+        ItemStack mao = mc.thePlayer == null ? null : mc.thePlayer.getHeldItem();
+        if (mao == null || mao.getItem() != Items.stick) return;
+        ev.setCanceled(true);
+        BlockPos b = ev.pos;
+        if (b == null) return;
+        if (proximoEhPos2) {
+            pos2 = b;
+            msg("pos2 = " + b.getX() + " " + b.getY() + " " + b.getZ());
+        } else {
+            pos1 = b;
+            msg("pos1 = " + b.getX() + " " + b.getY() + " " + b.getZ());
+        }
+        proximoEhPos2 = !proximoEhPos2;
+        if (pos1 != null && pos2 != null) {
+            atualizarArea();
+            usarArea = true;
+            msg("Area ligada: " + descricaoArea());
+        }
+    }
+
+    private void caixa(double x0, double y0, double z0, double x1, double y1, double z1) {
+        GL11.glBegin(GL11.GL_LINES);
+        double[] xs = {x0, x1};
+        double[] ys = {y0, y1};
+        double[] zs = {z0, z1};
+        for (int i = 0; i < 2; i++) {
+            for (int j = 0; j < 2; j++) {
+                GL11.glVertex3d(xs[0], ys[i], zs[j]);
+                GL11.glVertex3d(xs[1], ys[i], zs[j]);
+                GL11.glVertex3d(xs[i], ys[0], zs[j]);
+                GL11.glVertex3d(xs[i], ys[1], zs[j]);
+                GL11.glVertex3d(xs[i], ys[j], zs[0]);
+                GL11.glVertex3d(xs[i], ys[j], zs[1]);
+            }
+        }
+        GL11.glEnd();
+    }
+
     // linha da mira ate cada player (vermelha = perto, verde = longe), vista atraves das paredes
     @SubscribeEvent
     public void aoRenderMundo(RenderWorldLastEvent ev) {
-        if (!linhasPlayers || mc.theWorld == null || mc.thePlayer == null) return;
+        if (mc.theWorld == null || mc.thePlayer == null) return;
+        if (!linhasPlayers && pos1 == null && pos2 == null) return;
         Entity viewer = mc.getRenderViewEntity();
         if (viewer == null) return;
         float pt = ev.partialTicks;
@@ -1590,6 +1649,7 @@ public class AutoMine {
         GL11.glLineWidth(2.0f);
 
         for (EntityPlayer pl : mc.theWorld.playerEntities) {
+            if (!linhasPlayers) break;
             if (pl == mc.thePlayer || pl.isDead) continue;
             double dist = mc.thePlayer.getDistanceToEntity(pl);
             if (dist > alcancePlayers) continue;
@@ -1604,6 +1664,23 @@ public class AutoMine {
             GL11.glVertex3d(sx, sy, sz);
             GL11.glVertex3d(px, py, pz);
             GL11.glEnd();
+        }
+
+        // marcacao da area: pos1 verde, pos2 vermelho, area inteira amarela
+        GL11.glLineWidth(3.0f);
+        double e = 0.003;
+        if (pos1 != null) {
+            GlStateManager.color(0.0f, 1.0f, 0.0f, 1.0f);
+            caixa(pos1.getX() - e, pos1.getY() - e, pos1.getZ() - e, pos1.getX() + 1 + e, pos1.getY() + 1 + e, pos1.getZ() + 1 + e);
+        }
+        if (pos2 != null) {
+            GlStateManager.color(1.0f, 0.1f, 0.1f, 1.0f);
+            caixa(pos2.getX() - e, pos2.getY() - e, pos2.getZ() - e, pos2.getX() + 1 + e, pos2.getY() + 1 + e, pos2.getZ() + 1 + e);
+        }
+        if (pos1 != null && pos2 != null) {
+            atualizarArea();
+            GlStateManager.color(1.0f, 0.9f, 0.0f, 1.0f);
+            caixa(aMinX, aMinY, aMinZ, aMaxX + 1, aMaxY + 1, aMaxZ + 1);
         }
 
         GlStateManager.color(1.0f, 1.0f, 1.0f, 1.0f);
@@ -1927,11 +2004,20 @@ public class AutoMine {
                 } else {
                     msg("Agora va ate o outro canto e use /automine " + (a.equals("pos1") ? "pos2" : "pos1"));
                 }
+            } else if (a.equals("camadas")) {
+                if (args.length > 1) camadas = !args[1].equalsIgnoreCase("off");
+                else camadas = !camadas;
+                camadaEscavar = Integer.MIN_VALUE;
+                msg("Escavar camada por camada: " + (camadas ? "LIGADO" : "desligado (quebra o que estiver mais perto)"));
+            } else if (a.equals("varinha")) {
+                varinha = !(args.length > 1 && args[1].equalsIgnoreCase("off"));
+                msg("Varinha (graveto + botao direito no bloco): " + (varinha ? "LIGADA" : "desligada"));
             } else if (a.equals("area")) {
                 String o = args.length > 1 ? args[1].toLowerCase() : "";
                 if (o.equals("limpar")) {
                     pos1 = null;
                     pos2 = null;
+                    proximoEhPos2 = false;
                     usarArea = false;
                     msg("Area removida.");
                 } else if (o.equals("off") || o.equals("desligar")) {
