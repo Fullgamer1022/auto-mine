@@ -81,7 +81,7 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  * AJUSTES
  *   /automine velocidade 1-6        -> 1 = lento ... 6 = maximo (padrao 6)
  *   /automine limite N              -> para depois de quebrar N blocos (0 = sem limite)
- *   /automine turbo on|off          -> mineracao acelerada (padrao on)
+ *   /automine turbo on|max|off      -> mineracao acelerada (padrao on)
  *   /automine multi N               -> quantos blocos de uma vez (1 a 500)
  *   /automine multi on|off          -> LIGA/DESLIGA o multi (tecla N ou botao). Comeca desligado.
  *   /automine trecho S | raio N     -> segundos por direcao | distancia maxima do ponto inicial
@@ -126,6 +126,7 @@ public class AutoMine {
     private boolean modoEscavar = false;   // quebra TODOS os blocos da area demarcada
     private boolean turbo = true;          // mineracao acelerada (sem atraso entre blocos, quebra aos 70%)
     private boolean turboFalhou = false;
+    private boolean turboMax = false;      // alem do atraso, pula os 30% finais (pode fazer o servidor devolver o bloco)
     private BlockPos ultimoAlvoEscavar = null;
     private int camadaEscavar = Integer.MIN_VALUE; // altura (Y) da camada que esta sendo limpa
 
@@ -455,10 +456,8 @@ public class AutoMine {
             return;
         }
 
-        // pulo automatico a cada 4 segundos (segura a tecla por 3 ticks)
-        ticksPuloAuto++;
-        if (ticksPuloAuto >= INTERVALO_PULO) ticksPuloAuto = 0;
-        puloAuto = ticksPuloAuto < 3;
+        // pulo automatico removido (o pulo so acontece pra subir degrau)
+        puloAuto = false;
 
         if (multiAtivo()) processarPendentes();
 
@@ -1416,7 +1415,7 @@ public class AutoMine {
             // o servidor aceita a quebra com 70% de progresso: pula os 30% finais
             Float prog = ReflectionHelper.getPrivateValue(PlayerControllerMP.class, pc,
                     "curBlockDamageMP", "field_78770_f");
-            if (prog != null && prog.floatValue() >= 0.7f && prog.floatValue() < 1.0f) {
+            if (turboMax && prog != null && prog.floatValue() >= 0.7f && prog.floatValue() < 1.0f) {
                 ReflectionHelper.setPrivateValue(PlayerControllerMP.class, pc, Float.valueOf(1.0f),
                         "curBlockDamageMP", "field_78770_f");
             }
@@ -1431,7 +1430,7 @@ public class AutoMine {
         lin("§6--- Status do AutoMine ---");
         lin("§fLigado: §e" + (ativo ? "sim" : "nao") + "§f | Modo: §e" + modo);
         lin("§fMinerando: §e" + filtroAtual + "§f | Blocos compactos: §e" + (incluirBlocos ? "sim" : "nao"));
-        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo) | Turbo: §e" + (turboFalhou ? "indisponivel" : turbo ? "LIGADO" : "desligado"));
+        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo) | Turbo: §e" + (turboFalhou ? "indisponivel" : turbo ? (turboMax ? "MAXIMO" : "LIGADO") : "desligado"));
         lin("§fLimite: §e" + (limiteBlocos == 0 ? "sem limite" : limiteBlocos + " blocos")
                 + "§f | Quebrados agora: §e" + quebrados);
         lin("§fMulti: §e" + (multiLigado ? "LIGADO" : "desligado") + "§f | Quantidade: §e" + multi
@@ -1472,7 +1471,7 @@ public class AutoMine {
         } else if (t.equals("ajustes")) {
             lin(ouro + "--- Ajustes ---");
             lin(branco + "/automine velocidade 1-6 " + cinza + "- 1 lento ... 6 maximo (padrao 6)");
-            lin(branco + "/automine turbo on|off " + cinza + "- quebra bem mais rapido (padrao on; pode causar kick)");
+            lin(branco + "/automine turbo on|off " + cinza + "- on = sem atraso entre blocos (padrao) | max = ainda mais rapido, mas pode travar num bloco");
             lin(branco + "/automine limite N " + cinza + "- para depois de quebrar N blocos (0 = sem limite)");
             lin(branco + "/automine multi N " + cinza + "- quantos blocos de uma vez (1 a 500)");
             lin(branco + "/automine multi on|off " + cinza + "- LIGA ou DESLIGA o multi. Comeca desligado");
@@ -1854,12 +1853,14 @@ public class AutoMine {
             if (a.equals("parar") || a.equals("off")) {
                 desligar("AutoMine DESLIGADO");
             } else if (a.equals("turbo")) {
-                if (args.length > 1 && args[1].equalsIgnoreCase("off")) turbo = false;
+                String t = args.length > 1 ? args[1].toLowerCase() : "on";
+                if (t.equals("off")) turbo = false;
                 else {
                     turbo = true;
                     turboFalhou = false;
+                    turboMax = t.equals("max");
                 }
-                msg("Turbo: " + (turbo ? "LIGADO" : "desligado"));
+                msg("Turbo: " + (!turbo ? "desligado" : turboMax ? "MAXIMO (se ficar preso num bloco, use /automine turbo on)" : "LIGADO"));
             } else if (a.equals("macro")) {
                 String o = args.length > 1 ? args[1].toLowerCase() : "";
                 if (o.equals("gravar")) {
