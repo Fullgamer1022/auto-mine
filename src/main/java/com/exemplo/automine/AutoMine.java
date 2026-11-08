@@ -43,6 +43,7 @@ import net.minecraft.init.Items;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.play.client.C07PacketPlayerDigging;
+import net.minecraft.network.play.client.C09PacketHeldItemChange;
 import net.minecraft.util.BlockPos;
 import net.minecraft.util.ChatComponentText;
 import net.minecraft.util.EnumFacing;
@@ -84,6 +85,10 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  * AJUSTES
  *   /automine velocidade 1-6        -> 1 = lento ... 6 = maximo (padrao 6)
  *   /automine limite N              -> para depois de quebrar N blocos (0 = sem limite)
+ *   /automine nuker [on|off|N]      -> nuker: varios blocos por tick (funciona com o AutoMine desligado tambem)
+ *   /automine nuker minerios|tudo | forcar on|off
+ *   /automine reach N               -> alcance de quebra, 3 a 8 (padrao 4); tambem vale pro seu clique
+ *   /automine reach mouse on|off    -> liga/desliga o reach no seu proprio clique
  *   /automine doidao on|off         -> quebra qualquer bloco ao alcance (padrao off)
  *   /automine camadas on|off        -> escavar camada por camada (padrao on)
  *   /automine turbo on|max|off      -> mineracao acelerada (padrao on)
@@ -115,6 +120,29 @@ public class AutoMine {
     private static final double ALCANCE = 4.0;
     private static final int RAIO_BUSCA = 4;
     private static final double ALCANCE_LONGE = 10.0;
+    private boolean reachMouse = true;  // o reach tambem vale pro SEU clique/toque (alem do automatico)
+    private double reach = 4.0;           // alcance de quebra (4 a 6); acima de 4.4 usa o controlador direto
+
+    // estende a mira do jogo: o que VOCE clica/toca tambem alcanca o reach definido
+    @SubscribeEvent
+    public void aoRenderTick(TickEvent.RenderTickEvent ev) {
+        if (ev.phase != TickEvent.Phase.END || !reachMouse || reach <= 4.5) return;
+        if (mc.thePlayer == null || mc.theWorld == null || mc.currentScreen != null) return;
+        MovingObjectPosition atual = mc.objectMouseOver;
+        if (atual != null && atual.typeOfHit != MovingObjectPosition.MovingObjectType.MISS) return;
+        EntityPlayerSP pl = mc.thePlayer;
+        Vec3 olhos = pl.getPositionEyes(1.0f);
+        Vec3 olhar = pl.getLook(1.0f);
+        Vec3 fim = olhos.addVector(olhar.xCoord * reach, olhar.yCoord * reach, olhar.zCoord * reach);
+        MovingObjectPosition r = mc.theWorld.rayTraceBlocks(olhos, fim, false, false, true);
+        if (r != null && r.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK) {
+            mc.objectMouseOver = r;
+        }
+    }
+
+    private int raioBusca() {
+        return (int) Math.ceil(reach);
+    }
     private static final int RAIO_LONGE = 10;
     private static final float VIDA_MINIMA = 8.0f;
     private static final int INTERVALO_PULO = 80; // pula a cada 80 ticks = 4 segundos
@@ -133,6 +161,19 @@ public class AutoMine {
     private boolean turboFalhou = false;
     private boolean turboMax = false;      // alem do atraso, pula os 30% finais (pode fazer o servidor devolver o bloco)
     private BlockPos ultimoAlvoEscavar = null;
+    // nuker: quebra varios blocos por tick, direto por pacotes, seguindo a regra do servidor
+    private boolean nuker = false;
+    private int nukerQtd = 20;             // maximo de blocos "instantaneos" por tick
+    private boolean nukerForcar = false;   // manda START+STOP em tudo (so serve em servidor que nao valida o tempo)
+    private boolean nukerSoMinerio = false;
+    private int nukerQuebrados = 0;
+    private int tickGlobal = 0;
+    private BlockPos nukerLento = null;
+    private int nukerTicks = 0;
+    private int nukerSlot = -1;
+    private final Map<BlockPos, Integer> nukerEnviado = new HashMap<BlockPos, Integer>();
+    private final Map<BlockPos, Integer> nukerFalhas = new HashMap<BlockPos, Integer>();
+
     private boolean doidao = false;      // quebra QUALQUER bloco ao alcance de um player normal
     private boolean camadas = true;     // escavar camada por camada (off = quebra o que estiver mais perto)
     private int camadaEscavar = Integer.MIN_VALUE; // altura (Y) da camada que esta sendo limpa
@@ -388,6 +429,22 @@ public class AutoMine {
     }
 
     private void atacar(boolean on) {
+        if (nuker) on = false; // com o nuker ligado quem quebra e ele
+        // reach maior que o do jogo: quebra pelo controlador, sem depender da mira do jogo
+        if (on && reach > 4.4 && alvoContagem != null && mc.thePlayer != null && mc.theWorld != null
+                && mc.playerController != null && !mc.theWorld.isAirBlock(alvoContagem)) {
+            EntityPlayerSP pl = mc.thePlayer;
+            Vec3 olhos = new Vec3(pl.posX, pl.posY + pl.getEyeHeight(), pl.posZ);
+            Vec3 c = new Vec3(alvoContagem.getX() + 0.5, alvoContagem.getY() + 0.5, alvoContagem.getZ() + 0.5);
+            if (olhos.distanceTo(c) > 4.3) {
+                KeyBinding.setKeyBindState(mc.gameSettings.keyBindAttack.getKeyCode(), false);
+                MovingObjectPosition r = mc.theWorld.rayTraceBlocks(olhos, c);
+                EnumFacing f = (r != null && r.sideHit != null) ? r.sideHit : EnumFacing.UP;
+                mc.playerController.onPlayerDamageBlock(alvoContagem, f);
+                pl.swingItem();
+                return;
+            }
+        }
         KeyBinding.setKeyBindState(mc.gameSettings.keyBindAttack.getKeyCode(), on);
     }
 
@@ -411,6 +468,8 @@ public class AutoMine {
             reproduzindo = false;
             pendentes.clear();
             tentativas.clear();
+            nukerEnviado.clear();
+            nukerLento = null;
             return;
         }
 
@@ -436,6 +495,8 @@ public class AutoMine {
             else ligar();
         }
         if (turbo && !turboFalhou) aplicarTurbo();
+        tickGlobal++;
+        if (nuker) tickNuker(mc.thePlayer);
         // macro: grava cada tick do que voce faz / repete o que foi gravado
         if (gravando) gravarFrame(mc.thePlayer);
         if (reproduzindo) {
@@ -490,7 +551,7 @@ public class AutoMine {
 
         // 1) minerio ao alcance: para e quebra
         if (pausaTicks > 0) pausaTicks--;
-        BlockPos minerio = (pausaTicks > 0) ? null : acharMinerio(p, RAIO_BUSCA, ALCANCE);
+        BlockPos minerio = (pausaTicks > 0) ? null : acharMinerio(p, raioBusca(), reach);
         if (minerio != null) {
             andar(false);
             pular(puloAuto);
@@ -684,13 +745,14 @@ public class AutoMine {
         BlockPos melhor = null;
         double melhorScore = -Double.MAX_VALUE;
 
-        for (int dx = -RAIO_BUSCA; dx <= RAIO_BUSCA; dx++) {
-            for (int dy = -RAIO_BUSCA; dy <= RAIO_BUSCA; dy++) {
-                for (int dz = -RAIO_BUSCA; dz <= RAIO_BUSCA; dz++) {
+        int rb = raioBusca();
+        for (int dx = -rb; dx <= rb; dx++) {
+            for (int dy = -rb; dy <= rb; dy++) {
+                for (int dz = -rb; dz <= rb; dz++) {
                     BlockPos pos = base.add(dx, dy, dz);
                     Vec3 centro = new Vec3(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
                     double d = olhos.distanceTo(centro);
-                    if (d > ALCANCE) continue;
+                    if (d > reach) continue;
 
                     // so a camada de trabalho (a de cima limpa inteira antes de descer)
                     if (camadaEscavar != Integer.MIN_VALUE && pos.getY() != camadaEscavar) continue;
@@ -919,7 +981,7 @@ public class AutoMine {
         }
 
         // 1) minerio visivel ao alcance
-        BlockPos minerio = acharMinerio(p, RAIO_BUSCA, ALCANCE);
+        BlockPos minerio = acharMinerio(p, raioBusca(), reach);
         if (minerio != null) {
             boolean alinhado = mirarSuave(p, minerio);
             escolherFerramenta(p, minerio);
@@ -1442,7 +1504,7 @@ public class AutoMine {
         lin("§6--- Status do AutoMine ---");
         lin("§fLigado: §e" + (ativo ? "sim" : "nao") + "§f | Modo: §e" + modo);
         lin("§fMinerando: §e" + filtroAtual + "§f | Blocos compactos: §e" + (incluirBlocos ? "sim" : "nao"));
-        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo) | Doidao: §e" + (doidao ? "sim" : "nao") + "§f | Camadas: §e" + (camadas ? "sim" : "nao") + "§f | Turbo: §e" + (turboFalhou ? "indisponivel" : turbo ? (turboMax ? "MAXIMO" : "LIGADO") : "desligado"));
+        lin("§fVelocidade: §e" + nivelVel + "§f (1 lento ... 6 maximo) | Nuker: §e" + (nuker ? "LIGADO (" + nukerQuebrados + " quebrados)" : "desligado") + "§f | Reach: §e" + reach + "§f | Doidao: §e" + (doidao ? "sim" : "nao") + "§f | Camadas: §e" + (camadas ? "sim" : "nao") + "§f | Turbo: §e" + (turboFalhou ? "indisponivel" : turbo ? (turboMax ? "MAXIMO" : "LIGADO") : "desligado"));
         lin("§fLimite: §e" + (limiteBlocos == 0 ? "sem limite" : limiteBlocos + " blocos")
                 + "§f | Quebrados agora: §e" + quebrados);
         lin("§fMulti: §e" + (multiLigado ? "LIGADO" : "desligado") + "§f | Quantidade: §e" + multi
@@ -1484,6 +1546,10 @@ public class AutoMine {
         } else if (t.equals("ajustes")) {
             lin(ouro + "--- Ajustes ---");
             lin(branco + "/automine velocidade 1-6 " + cinza + "- 1 lento ... 6 maximo (padrao 6)");
+            lin(branco + "/automine nuker [on|off|N] " + cinza + "- quebra varios blocos por tick ao alcance (N = blocos/tick, padrao 20)");
+            lin(branco + "/automine nuker minerios|tudo " + cinza + "- o que o nuker quebra (padrao: tudo)");
+            lin(branco + "/automine nuker forcar on|off " + cinza + "- tenta quebrar tudo de uma vez; so em servidor que nao valida");
+            lin(branco + "/automine reach N " + cinza + "- alcance de quebra de 3 a 8 (padrao 4); vale pro automatico, nuker e pro seu clique | reach mouse on|off");
             lin(branco + "/automine doidao on|off " + cinza + "- quebra QUALQUER bloco ao alcance normal do player (padrao off)");
             lin(branco + "/automine camadas on|off " + cinza + "- escavar camada por camada (padrao on); off = quebra o mais perto");
             lin(branco + "/automine turbo on|off " + cinza + "- on = sem atraso entre blocos (padrao) | max = ainda mais rapido, mas pode travar num bloco");
@@ -1705,6 +1771,163 @@ public class AutoMine {
         }
     }
 
+    // ------------------------------------------------------ nuker
+
+    private static class NK {
+        final BlockPos pos;
+        final double d;
+
+        NK(BlockPos pos, double d) {
+            this.pos = pos;
+            this.d = d;
+        }
+    }
+
+    private void desligarNuker() {
+        if (nukerLento != null) {
+            enviarDig(C07PacketPlayerDigging.Action.ABORT_DESTROY_BLOCK, nukerLento, EnumFacing.UP);
+        }
+        nukerLento = null;
+        nukerEnviado.clear();
+        nukerFalhas.clear();
+    }
+
+    private void nukerSlot(EntityPlayerSP p) {
+        if (nukerSlot != p.inventory.currentItem && mc.getNetHandler() != null) {
+            nukerSlot = p.inventory.currentItem;
+            mc.getNetHandler().addToSendQueue(new C09PacketHeldItemChange(nukerSlot));
+        }
+    }
+
+    private void tickNuker(EntityPlayerSP p) {
+        if (mc.currentScreen != null || mc.getNetHandler() == null) return;
+        if (p.isInLava() || p.getHealth() < VIDA_MINIMA) return;
+
+        // confere o que foi enviado: sumiu = quebrou; nao sumiu depois de 8 ticks = falhou (ate 3 tentativas)
+        for (BlockPos k : new ArrayList<BlockPos>(nukerEnviado.keySet())) {
+            int t = nukerEnviado.get(k);
+            if (mc.theWorld.isAirBlock(k)) {
+                nukerEnviado.remove(k);
+                nukerQuebrados++;
+            } else if (tickGlobal - t > 8) {
+                nukerEnviado.remove(k);
+                Integer f = nukerFalhas.get(k);
+                nukerFalhas.put(k, f == null ? 1 : f + 1);
+            }
+        }
+
+        if (limiteBlocos > 0 && nukerQuebrados >= limiteBlocos) {
+            nuker = false;
+            desligarNuker();
+            msg("Nuker parou: limite de " + limiteBlocos + " blocos.");
+            return;
+        }
+
+        Vec3 olhos = new Vec3(p.posX, p.posY + p.getEyeHeight(), p.posZ);
+        BlockPos base = new BlockPos(p.posX, p.posY + p.getEyeHeight(), p.posZ);
+        BlockPos pe = new BlockPos(p.posX, p.posY, p.posZ);
+        double alc = Math.min(8.0, Math.max(reach, 4.5));
+        int r = (int) Math.ceil(alc);
+
+        List<NK> lista = new ArrayList<NK>();
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    BlockPos pos = base.add(dx, dy, dz);
+                    Block b = mc.theWorld.getBlockState(pos).getBlock();
+                    if (b == Blocks.air) continue;
+                    if (nukerSoMinerio && !minerios.contains(b)) continue;
+                    if (usarArea && !dentroArea(pos)) continue;
+                    if (nukerEnviado.containsKey(pos)) continue;
+                    Integer f = nukerFalhas.get(pos);
+                    if (f != null && f >= 3) continue;
+                    double d = olhos.distanceTo(new Vec3(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5));
+                    if (d > alc) continue;
+                    if (!escavavel(pos)) continue;
+                    if (pos.equals(pe.down()) && !chaoSeguro(pe)) continue;
+                    lista.add(new NK(pos, d));
+                }
+            }
+        }
+        if (lista.isEmpty()) {
+            if (nukerLento != null) {
+                enviarDig(C07PacketPlayerDigging.Action.ABORT_DESTROY_BLOCK, nukerLento, EnumFacing.UP);
+                nukerLento = null;
+            }
+            return;
+        }
+        Collections.sort(lista, new Comparator<NK>() {
+            @Override
+            public int compare(NK a, NK b) {
+                return Double.compare(a.d, b.d);
+            }
+        });
+
+        int budget = nukerQtd;
+        if (limiteBlocos > 0) budget = Math.min(budget, limiteBlocos - nukerQuebrados - nukerEnviado.size());
+        if (budget <= 0) return;
+
+        int feitos = 0;
+        for (NK n : lista) {
+            if (feitos >= budget) break;
+            BlockPos pos = n.pos;
+            Block b = mc.theWorld.getBlockState(pos).getBlock();
+            escolherFerramenta(p, pos);
+            nukerSlot(p);
+            float h = b.getPlayerRelativeBlockHardness(p, mc.theWorld, pos);
+            if (nukerForcar || h >= 0.7f) {
+                EnumFacing face = faceParaJogador(p, pos);
+                enviarDig(C07PacketPlayerDigging.Action.START_DESTROY_BLOCK, pos, face);
+                enviarDig(C07PacketPlayerDigging.Action.STOP_DESTROY_BLOCK, pos, face);
+                nukerEnviado.put(pos, tickGlobal);
+                feitos++;
+            }
+        }
+        if (feitos > 0) {
+            nukerLento = null; // o servidor so acompanha um bloco: o START acima trocou o alvo dele
+            p.swingItem();
+            return;
+        }
+
+        // nenhum bloco instantaneo: trabalha no mais perto, respeitando o tempo de quebra do servidor
+        BlockPos alvo = null;
+        if (nukerLento != null) {
+            for (NK n : lista) {
+                if (n.pos.equals(nukerLento)) {
+                    alvo = nukerLento;
+                    break;
+                }
+            }
+        }
+        if (alvo == null) alvo = lista.get(0).pos;
+        Block b = mc.theWorld.getBlockState(alvo).getBlock();
+        escolherFerramenta(p, alvo);
+        nukerSlot(p);
+        EnumFacing face = faceParaJogador(p, alvo);
+        if (!alvo.equals(nukerLento)) {
+            nukerLento = alvo;
+            nukerTicks = 0;
+            enviarDig(C07PacketPlayerDigging.Action.START_DESTROY_BLOCK, alvo, face);
+        } else {
+            nukerTicks++;
+            float h = Math.max(0.001f, b.getPlayerRelativeBlockHardness(p, mc.theWorld, alvo));
+            int precisa = (int) Math.ceil(0.7f / h);
+            if (nukerTicks >= precisa) {
+                enviarDig(C07PacketPlayerDigging.Action.STOP_DESTROY_BLOCK, alvo, face);
+                nukerEnviado.put(alvo, tickGlobal);
+                nukerLento = null;
+            }
+        }
+        p.swingItem();
+    }
+
+    private EnumFacing faceParaJogador(EntityPlayerSP p, BlockPos pos) {
+        return EnumFacing.getFacingFromVector(
+                (float) (p.posX - (pos.getX() + 0.5)),
+                (float) (p.posY + p.getEyeHeight() - (pos.getY() + 0.5)),
+                (float) (p.posZ - (pos.getZ() + 0.5)));
+    }
+
     // ------------------------------------------------------ multi-quebra
 
     private void enviarDig(C07PacketPlayerDigging.Action acao, BlockPos pos, EnumFacing face) {
@@ -1840,10 +2063,10 @@ public class AutoMine {
         double melhorDist = Double.MAX_VALUE;
 
         // doidao: qualquer bloco no alcance normal de um player (4.5), so na busca de perto
-        boolean qualquer = doidao && alcance <= 5.0;
+        boolean qualquer = doidao && alcance < ALCANCE_LONGE;
         if (qualquer) {
-            raio = 5;
-            alcance = 4.5;
+            alcance = Math.max(alcance, 4.5);
+            raio = (int) Math.ceil(alcance);
         }
         BlockPos pe = new BlockPos(p.posX, p.posY, p.posZ);
 
@@ -2018,6 +2241,53 @@ public class AutoMine {
                 } else {
                     msg("Agora va ate o outro canto e use /automine " + (a.equals("pos1") ? "pos2" : "pos1"));
                 }
+            } else if (a.equals("nuker")) {
+                String o = args.length > 1 ? args[1].toLowerCase() : "";
+                boolean novo = !nuker;
+                if (o.equals("on")) novo = true;
+                else if (o.equals("off")) novo = false;
+                else if (o.equals("forcar")) {
+                    nukerForcar = args.length > 2 ? !args[2].equalsIgnoreCase("off") : !nukerForcar;
+                    msg("Nuker forcar: " + (nukerForcar ? "LIGADO (manda START+STOP em tudo; so funciona se o servidor nao validar)" : "desligado"));
+                    return;
+                } else if (o.equals("minerios") || o.equals("tudo")) {
+                    nukerSoMinerio = o.equals("minerios");
+                    msg("Nuker quebra: " + (nukerSoMinerio ? "so minerios" : "qualquer bloco"));
+                    return;
+                } else if (!o.isEmpty()) {
+                    try {
+                        nukerQtd = Math.max(1, Math.min(200, Integer.parseInt(o)));
+                        novo = true;
+                    } catch (NumberFormatException ex) {
+                        msg("Uso: /automine nuker [on|off|N|forcar on|off|minerios|tudo]");
+                        return;
+                    }
+                }
+                if (novo && !nuker) {
+                    nukerQuebrados = 0;
+                    nukerEnviado.clear();
+                    nukerFalhas.clear();
+                    nukerLento = null;
+                }
+                if (!novo && nuker) desligarNuker();
+                nuker = novo;
+                msg("NUKER " + (nuker ? "LIGADO" : "desligado") + " | ate " + nukerQtd + " blocos instantaneos por tick | alcance "
+                        + Math.min(8.0, Math.max(reach, 4.5)));
+            } else if (a.equals("reach")) {
+                if (args.length > 1 && args[1].equalsIgnoreCase("mouse")) {
+                    reachMouse = args.length > 2 ? !args[2].equalsIgnoreCase("off") : !reachMouse;
+                    msg("Reach no seu clique/toque: " + (reachMouse ? "LIGADO" : "desligado"));
+                    return;
+                }
+                if (args.length > 1) {
+                    try {
+                        double v = Double.parseDouble(args[1].replace(',', '.'));
+                        reach = Math.max(3.0, Math.min(8.0, v));
+                    } catch (NumberFormatException ex) {
+                        msg("Uso: /automine reach <3 a 6>");
+                    }
+                }
+                msg("Reach: " + reach + (reach > 4.4 ? " (acima de 4.4 vale tambem pro SEU clique; servidor vanilla recusa acima de 6)" : ""));
             } else if (a.equals("doidao")) {
                 if (args.length > 1) doidao = !args[1].equalsIgnoreCase("off");
                 else doidao = !doidao;
